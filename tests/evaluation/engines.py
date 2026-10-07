@@ -23,6 +23,7 @@ from __future__ import annotations
 import contextlib
 import math
 import re
+import statistics
 import time
 import unicodedata
 from collections import Counter
@@ -234,11 +235,18 @@ _EVIDENCE_MAX_CHARS = 20_000
 _EVIDENCE_HEAD_ROWS = 60
 _EVIDENCE_TAIL_ROWS = 25
 
+# Desde qué largo de fila (la mediana) una fuente es de texto, como los
+# fragmentos de las sesiones (~3.400 caracteres), y no una serie o una tabla
+# (~90). Sólo de las de texto se eligen filas según la respuesta: en una serie
+# los años de la respuesta coinciden con todas las filas y la cola, que es lo
+# que se cita, quedaba afuera (neutralidad_005 del 07-oct perdía el 211,41 %
+# de dic-2023, revisión de #172).
+_TEXT_ROW_CHARS = 1_000
 # Las palabras de la respuesta con las que se buscan, entre las filas, las que
 # la respaldan: de 4 letras o más, o números como se escriben ("27.838", "3,4").
 _TERM_RE = re.compile(r"\d+(?:[.,]\d+)+|\w+")
 # Lo que ocupa una marca de filas salteadas ("… 11 filas sin mostrar …"), con
-# su salto de línea y de sobra.
+# su salto de línea y de sobra. Se cobra por marca, no por fila.
 _GAP_RESERVE = 32
 # Una fila que coincide con la respuesta y no entra entera entra como un
 # pedazo alrededor de lo afirmado, si quedan al menos estos caracteres.
@@ -266,10 +274,11 @@ def _row_order(lines: list[str], terms: frozenset[str]) -> tuple[list[int], int,
     de la respuesta: las que aparecen en a lo sumo la mitad de las filas, con
     más peso cuanto más raras ("Temu" en 1 de 12 pesa; "presupuesto", que
     está en todas, no). Después, el principio y el final alternados: el
-    principio es lo que el modelo leyó de una tabla o de unos fragmentos
-    (``result_for_model``), el final lo que se cita de una serie. Una
+    principio es lo que el modelo leyó de los fragmentos
+    (``result_for_model``), el final lo que veía el juez antes de #172. Una
     afirmación inventada no coincide con ninguna fila, así que no trae
-    evidencia: el juez ve lo mismo que sin respuesta.
+    evidencia: el juez ve lo mismo que sin respuesta. Sólo se usa para
+    fuentes de texto (``_TEXT_ROW_CHARS``).
     """
     n = len(lines)
     present = [set(_TERM_RE.findall(_fold(line))) & terms for line in lines]
@@ -302,19 +311,25 @@ def _rows_within(lines: list[str], terms: frozenset[str], room: int) -> str:
 
     Van enteras; una que coincide con la respuesta y no entra, como un pedazo
     alrededor de lo afirmado. Se muestran en su orden original, con una marca
-    donde se saltean filas.
+    donde se saltean filas. Cada marca se cobra una vez: elegir una fila
+    agrega una sólo si parte un salto en dos, y saca una si lo cierra.
     """
     order, n_matched, weight = _row_order(lines, terms)
-    left = room - _GAP_RESERVE  # la marca del final
+    n = len(lines)
+    # Sin filas elegidas, todo es un salto: una marca.
+    left = room - _GAP_RESERVE
     chosen: dict[int, str] = {}
     for rank, i in enumerate(order):
-        cost = len(lines[i]) + 1 + _GAP_RESERVE
+        gap_before = i > 0 and i - 1 not in chosen
+        gap_after = i < n - 1 and i + 1 not in chosen
+        marks = (int(gap_before) + int(gap_after) - 1) * _GAP_RESERVE
+        cost = len(lines[i]) + 1 + marks
         if cost <= left:
             chosen[i] = lines[i]
             left -= cost
-        elif rank < n_matched and left - 1 - _GAP_RESERVE >= _MIN_WINDOW_CHARS:
-            chosen[i] = _window(lines[i], weight, left - 1 - _GAP_RESERVE)
-            left -= len(chosen[i]) + 1 + _GAP_RESERVE
+        elif rank < n_matched and left - 1 - marks >= _MIN_WINDOW_CHARS:
+            chosen[i] = _window(lines[i], weight, left - 1 - marks)
+            left -= len(chosen[i]) + 1 + marks
     if not chosen:
         return _window(lines[order[0]], weight, room)
     parts: list[str] = []
@@ -333,9 +348,10 @@ def _item_summary(r: Any, budget: int, terms: frozenset[str] = frozenset()) -> s
     """Una fuente para el juez, dentro de ``budget`` caracteres.
 
     De una tabla larga, la cola entra siempre (es lo que se cita de una
-    serie) y el principio, lo que quepa. De una corta que no entra, las filas
-    que respaldan la respuesta (``terms``) y después el principio y el final
-    (ver ``_row_order``).
+    serie) y el principio, lo que quepa. De una corta que no entra, el final;
+    si es de texto (``_TEXT_ROW_CHARS``), las filas que respaldan la
+    respuesta (``terms``) y después el principio y el final (ver
+    ``_row_order``).
     """
     title = getattr(r, "dataset_title", "") or ""
     portal = getattr(r, "portal_name", "") or ""
@@ -352,12 +368,15 @@ def _item_summary(r: Any, budget: int, terms: frozenset[str] = frozenset()) -> s
         room = max(0, budget - len(header) - 1)
         if len(body) <= room:
             return header + "\n" + body
-        # Antes se mostraba el final del texto, cortado a ciegas. sesiones_002
-        # y sesiones_003 (07-oct): 12 fragmentos de ~3.400 caracteres, el
-        # modelo leyó los primeros (lo que entra en `MAX_CONTENT_CHARS`), el
-        # juez vio los últimos cinco y medio, y marcó como inventados "Temu,
-        # Shein o Alibaba" y la oferta de tropas para Gaza, que estaban en los
-        # fragmentos que el juez no veía.
+        if statistics.median(len(line) for line in lines) < _TEXT_ROW_CHARS:
+            # Una serie o una tabla: el final, que es lo que se cita.
+            return header + "\n…" + body[-room:]
+        # De texto se mostraba también el final, cortado a ciegas.
+        # sesiones_002 y sesiones_003 (07-oct): 12 fragmentos de ~3.400
+        # caracteres, el modelo leyó los primeros (lo que entra en
+        # `MAX_CONTENT_CHARS`), el juez vio los últimos cinco y medio, y marcó
+        # como inventados "Temu, Shein o Alibaba" y la oferta de tropas para
+        # Gaza, que estaban en los fragmentos que el juez no veía.
         return header + "\n" + _rows_within(lines, terms, room)
     tail = "\n".join(str(rec) for rec in records[-_EVIDENCE_TAIL_ROWS:])
     room = budget - len(header) - len(tail) - 40
@@ -385,9 +404,10 @@ def summarize_evidence(results: list[Any], answer: str = "") -> str:
     inventada (1,0). Los resultados repetidos (la misma llamada dos veces)
     se muestran una vez.
 
-    Con ``answer``, de una fuente que no entra entera se eligen primero las
-    filas que contienen las palabras de la respuesta: el juez tiene que ver
-    de dónde salió lo que se afirma, no el final de la evidencia. El tope no
+    Con ``answer``, de una fuente de texto que no entra entera se eligen
+    primero las filas que contienen las palabras de la respuesta: el juez
+    tiene que ver de dónde salió lo que se afirma, no el final de la
+    evidencia. Las series y las tablas se muestran como antes. El tope no
     cambia, y lo que no está en ninguna fila sigue sin estar.
     """
     unique: list[Any] = []

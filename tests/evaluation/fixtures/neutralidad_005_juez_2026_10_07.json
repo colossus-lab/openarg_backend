@@ -1,0 +1,1481 @@
+{
+ "_doc": "neutralidad_005 de la batería v3 del 07-oct-2026 en staging (bateria_ola4.json, corrida 0): aprobó con juez de alucinación 0,0. Las cuatro fuentes se reconstruyeron desde evidence_items (los números de cada serie en orden, con fechas mensuales desde 2018-01 y la fila sin dato de dic-2025 en la base monetaria); con el engines.py de staging (0d6640a) reproducen byte por byte la evidencia que vio el juez (sha256_evidencia_juez). La respuesta es la real.",
+ "pregunta": "¿Qué relación hay entre la emisión monetaria y la inflación en los últimos años?",
+ "respuesta": "**Dato atrasado:** el último dato de «Factores de explicación de Base Monetaria» es de mayo de 2026 (serie mensual) y la fuente no la actualizó desde entonces, así que no refleja el valor actual.\n\nAcá está el panorama completo de los datos oficiales (BCRA e INDEC) desde 2018 hasta mayo/junio de 2026, usando variación interanual de la base monetaria y del IPC:\n\n---\n\n## Emisión monetaria e inflación: lo que muestran los datos (2018–2026)\n\nAmbas series se movieron en la misma dirección en términos generales, aunque con diferencias de magnitud y timing según el período:\n\n### 📊 Tabla comparativa — variación interanual (%)\n\n| Período | Base monetaria | IPC (inflación) |\n|---|---|---|\n| **2018** (ene→dic) | 17% → 41% | 25% → 48% |\n| **2019** | 40% → 35% | 49% → 54% |\n| **2020** (pandemia) | 26% → **82%** (sept.) | 53% → 36% |\n| **2021** | 45% → 48% | 39% → 51% |\n| **2022** | 46% → 42% | 51% → **95%** |\n| **2023** | 46% → **99%** (nov.) | 99% → **211%** (dic.) |\n| **2024** (primer semestre) | **243%** (jun.) | **289%** (abr.) |\n| **2024** (segundo semestre→2025) | 84% (jul.) → **20%** (may-25) | 37% (jul-25) |\n| **2025–2026** | 42% (ene-26) → **20%** (may-26) | 32% → **34%** (jun-26) |\n\n*Fuentes: BCRA – Factores de explicación de Base Monetaria; INDEC – IPC Nacional Base dic. 2016.*\n\n---\n\n### Los momentos más marcados\n\n**2020:** La base monetaria se expandió hasta +83% interanual (septiembre), mientras la inflación se mantuvo en torno al 36–42%. La brecha fue notoria ese año.\n\n**2022–2023:** Ambas series escalaron juntas. La base monetaria fue de ~42% a casi 100% interanual hacia fines de 2023; la inflación hizo lo propio, llegando a 211% en diciembre de 2023.\n\n**2024 (pico):** La base monetaria marcó +243% interanual en junio de 2024; el IPC alcanzó +289% en abril de 2024. El pico de inflación llegó levemente antes o al mismo tiempo que el de expansión monetaria.\n\n**2024–2026 (desaceleración):** A partir del segundo semestre de 2024, la variación interanual de la base monetaria cayó fuertemente: de 243% (junio 2024) a 20% (mayo 2026). La inflación también cayó, pero a un ritmo distinto: de 289% (abril 2024) a 34% (junio 2026). La baja de la emisión precedió a la baja de la inflación.\n\n---\n\n### En síntesis\n\nLos datos muestran que **ambas variables se movieron en la misma dirección** a lo largo del período —cuando la emisión aceleró, la inflación también lo hizo; cuando la emisión se frenó, la inflación bajó con rezago—, pero **las magnitudes y los tiempos no fueron idénticos**: en 2020 la expansión monetaria fue muy alta pero la inflación se moderó; en 2022 la inflación superó largamente el crecimiento de la base; y en 2024–2026 la desaceleración de la emisión fue más rápida que la de los precios. Estos datos no permiten establecer una relación de causalidad.",
+ "puntaje_juez": 0.0,
+ "sha256_evidencia_juez": "3ff6602dad0a703c2753054bd3d6476c9a9d3e6081c46c68c129f3b11b975731",
+ "fuentes": [
+  {
+   "titulo": "Factores de explicación de Base Monetaria",
+   "portal": "API de Series de Tiempo",
+   "url": "https://datos.gob.ar/series/api/series/?ids=331.1_SALDO_BASERIA__15",
+   "total_records": 101,
+   "unidades": "Variación porcentual interanual (en %)",
+   "filas": [
+    {
+     "fecha": "2018-01-01",
+     "Saldo de la Base Monetaria": 16.69
+    },
+    {
+     "fecha": "2018-02-01",
+     "Saldo de la Base Monetaria": 23.1
+    },
+    {
+     "fecha": "2018-03-01",
+     "Saldo de la Base Monetaria": 31.89
+    },
+    {
+     "fecha": "2018-04-01",
+     "Saldo de la Base Monetaria": 25.56
+    },
+    {
+     "fecha": "2018-05-01",
+     "Saldo de la Base Monetaria": 34.79
+    },
+    {
+     "fecha": "2018-06-01",
+     "Saldo de la Base Monetaria": 25.27
+    },
+    {
+     "fecha": "2018-07-01",
+     "Saldo de la Base Monetaria": 28.18
+    },
+    {
+     "fecha": "2018-08-01",
+     "Saldo de la Base Monetaria": 44.12
+    },
+    {
+     "fecha": "2018-09-01",
+     "Saldo de la Base Monetaria": 43.95
+    },
+    {
+     "fecha": "2018-10-01",
+     "Saldo de la Base Monetaria": 32.75
+    },
+    {
+     "fecha": "2018-11-01",
+     "Saldo de la Base Monetaria": 40.73
+    },
+    {
+     "fecha": "2018-12-01",
+     "Saldo de la Base Monetaria": 40.74
+    },
+    {
+     "fecha": "2019-01-01",
+     "Saldo de la Base Monetaria": 40.03
+    },
+    {
+     "fecha": "2019-02-01",
+     "Saldo de la Base Monetaria": 39.9
+    },
+    {
+     "fecha": "2019-03-01",
+     "Saldo de la Base Monetaria": 35.77
+    },
+    {
+     "fecha": "2019-04-01",
+     "Saldo de la Base Monetaria": 40.38
+    },
+    {
+     "fecha": "2019-05-01",
+     "Saldo de la Base Monetaria": 32.92
+    },
+    {
+     "fecha": "2019-06-01",
+     "Saldo de la Base Monetaria": 31.83
+    },
+    {
+     "fecha": "2019-07-01",
+     "Saldo de la Base Monetaria": 25.54
+    },
+    {
+     "fecha": "2019-08-01",
+     "Saldo de la Base Monetaria": 7.27
+    },
+    {
+     "fecha": "2019-09-01",
+     "Saldo de la Base Monetaria": 4.83
+    },
+    {
+     "fecha": "2019-10-01",
+     "Saldo de la Base Monetaria": 20.1
+    },
+    {
+     "fecha": "2019-11-01",
+     "Saldo de la Base Monetaria": 34.93
+    },
+    {
+     "fecha": "2019-12-01",
+     "Saldo de la Base Monetaria": 34.52
+    },
+    {
+     "fecha": "2020-01-01",
+     "Saldo de la Base Monetaria": 26.32
+    },
+    {
+     "fecha": "2020-02-01",
+     "Saldo de la Base Monetaria": 22.31
+    },
+    {
+     "fecha": "2020-03-01",
+     "Saldo de la Base Monetaria": 69.59
+    },
+    {
+     "fecha": "2020-04-01",
+     "Saldo de la Base Monetaria": 33.09
+    },
+    {
+     "fecha": "2020-05-01",
+     "Saldo de la Base Monetaria": 57.12
+    },
+    {
+     "fecha": "2020-06-01",
+     "Saldo de la Base Monetaria": 57.33
+    },
+    {
+     "fecha": "2020-07-01",
+     "Saldo de la Base Monetaria": 81.36
+    },
+    {
+     "fecha": "2020-08-01",
+     "Saldo de la Base Monetaria": 76.46
+    },
+    {
+     "fecha": "2020-09-01",
+     "Saldo de la Base Monetaria": 82.72
+    },
+    {
+     "fecha": "2020-10-01",
+     "Saldo de la Base Monetaria": 60.39
+    },
+    {
+     "fecha": "2020-11-01",
+     "Saldo de la Base Monetaria": 33.24
+    },
+    {
+     "fecha": "2020-12-01",
+     "Saldo de la Base Monetaria": 30.33
+    },
+    {
+     "fecha": "2021-01-01",
+     "Saldo de la Base Monetaria": 45.2
+    },
+    {
+     "fecha": "2021-02-01",
+     "Saldo de la Base Monetaria": 40.37
+    },
+    {
+     "fecha": "2021-03-01",
+     "Saldo de la Base Monetaria": 6.12
+    },
+    {
+     "fecha": "2021-04-01",
+     "Saldo de la Base Monetaria": 26.94
+    },
+    {
+     "fecha": "2021-05-01",
+     "Saldo de la Base Monetaria": 18.11
+    },
+    {
+     "fecha": "2021-06-01",
+     "Saldo de la Base Monetaria": 26.38
+    },
+    {
+     "fecha": "2021-07-01",
+     "Saldo de la Base Monetaria": 14.58
+    },
+    {
+     "fecha": "2021-08-01",
+     "Saldo de la Base Monetaria": 25.34
+    },
+    {
+     "fecha": "2021-09-01",
+     "Saldo de la Base Monetaria": 22.84
+    },
+    {
+     "fecha": "2021-10-01",
+     "Saldo de la Base Monetaria": 35.25
+    },
+    {
+     "fecha": "2021-11-01",
+     "Saldo de la Base Monetaria": 40.81
+    },
+    {
+     "fecha": "2021-12-01",
+     "Saldo de la Base Monetaria": 47.92
+    },
+    {
+     "fecha": "2022-01-01",
+     "Saldo de la Base Monetaria": 46.34
+    },
+    {
+     "fecha": "2022-02-01",
+     "Saldo de la Base Monetaria": 52.44
+    },
+    {
+     "fecha": "2022-03-01",
+     "Saldo de la Base Monetaria": 44.46
+    },
+    {
+     "fecha": "2022-04-01",
+     "Saldo de la Base Monetaria": 46.02
+    },
+    {
+     "fecha": "2022-05-01",
+     "Saldo de la Base Monetaria": 49.68
+    },
+    {
+     "fecha": "2022-06-01",
+     "Saldo de la Base Monetaria": 44.32
+    },
+    {
+     "fecha": "2022-07-01",
+     "Saldo de la Base Monetaria": 55.12
+    },
+    {
+     "fecha": "2022-08-01",
+     "Saldo de la Base Monetaria": 47.16
+    },
+    {
+     "fecha": "2022-09-01",
+     "Saldo de la Base Monetaria": 39.41
+    },
+    {
+     "fecha": "2022-10-01",
+     "Saldo de la Base Monetaria": 42.85
+    },
+    {
+     "fecha": "2022-11-01",
+     "Saldo de la Base Monetaria": 43.74
+    },
+    {
+     "fecha": "2022-12-01",
+     "Saldo de la Base Monetaria": 42.41
+    },
+    {
+     "fecha": "2023-01-01",
+     "Saldo de la Base Monetaria": 46.42
+    },
+    {
+     "fecha": "2023-02-01",
+     "Saldo de la Base Monetaria": 42.16
+    },
+    {
+     "fecha": "2023-03-01",
+     "Saldo de la Base Monetaria": 52.81
+    },
+    {
+     "fecha": "2023-04-01",
+     "Saldo de la Base Monetaria": 55.07
+    },
+    {
+     "fecha": "2023-05-01",
+     "Saldo de la Base Monetaria": 48.0
+    },
+    {
+     "fecha": "2023-06-01",
+     "Saldo de la Base Monetaria": 49.09
+    },
+    {
+     "fecha": "2023-07-01",
+     "Saldo de la Base Monetaria": 48.08
+    },
+    {
+     "fecha": "2023-08-01",
+     "Saldo de la Base Monetaria": 56.96
+    },
+    {
+     "fecha": "2023-09-01",
+     "Saldo de la Base Monetaria": 66.58
+    },
+    {
+     "fecha": "2023-10-01",
+     "Saldo de la Base Monetaria": 68.35
+    },
+    {
+     "fecha": "2023-11-01",
+     "Saldo de la Base Monetaria": 99.07
+    },
+    {
+     "fecha": "2023-12-01",
+     "Saldo de la Base Monetaria": 84.64
+    },
+    {
+     "fecha": "2024-01-01",
+     "Saldo de la Base Monetaria": 105.46
+    },
+    {
+     "fecha": "2024-02-01",
+     "Saldo de la Base Monetaria": 101.95
+    },
+    {
+     "fecha": "2024-03-01",
+     "Saldo de la Base Monetaria": 132.12
+    },
+    {
+     "fecha": "2024-04-01",
+     "Saldo de la Base Monetaria": 154.77
+    },
+    {
+     "fecha": "2024-05-01",
+     "Saldo de la Base Monetaria": 207.58
+    },
+    {
+     "fecha": "2024-06-01",
+     "Saldo de la Base Monetaria": 242.9
+    },
+    {
+     "fecha": "2024-07-01",
+     "Saldo de la Base Monetaria": 241.37
+    },
+    {
+     "fecha": "2024-08-01",
+     "Saldo de la Base Monetaria": 231.52
+    },
+    {
+     "fecha": "2024-09-01",
+     "Saldo de la Base Monetaria": 227.99
+    },
+    {
+     "fecha": "2024-10-01",
+     "Saldo de la Base Monetaria": 213.86
+    },
+    {
+     "fecha": "2024-11-01",
+     "Saldo de la Base Monetaria": 165.49
+    },
+    {
+     "fecha": "2024-12-01",
+     "Saldo de la Base Monetaria": 209.42
+    },
+    {
+     "fecha": "2025-01-01",
+     "Saldo de la Base Monetaria": 176.89
+    },
+    {
+     "fecha": "2025-02-01",
+     "Saldo de la Base Monetaria": 187.27
+    },
+    {
+     "fecha": "2025-03-01",
+     "Saldo de la Base Monetaria": 144.98
+    },
+    {
+     "fecha": "2025-04-01",
+     "Saldo de la Base Monetaria": 139.16
+    },
+    {
+     "fecha": "2025-05-01",
+     "Saldo de la Base Monetaria": 103.71
+    },
+    {
+     "fecha": "2025-06-01",
+     "Saldo de la Base Monetaria": 84.2
+    },
+    {
+     "fecha": "2025-07-01",
+     "Saldo de la Base Monetaria": 83.81
+    },
+    {
+     "fecha": "2025-08-01",
+     "Saldo de la Base Monetaria": 101.61
+    },
+    {
+     "fecha": "2025-09-01",
+     "Saldo de la Base Monetaria": 88.85
+    },
+    {
+     "fecha": "2025-10-01",
+     "Saldo de la Base Monetaria": 81.94
+    },
+    {
+     "fecha": "2025-11-01",
+     "Saldo de la Base Monetaria": 71.79
+    },
+    {
+     "fecha": "2025-12-01",
+     "Saldo de la Base Monetaria": null
+    },
+    {
+     "fecha": "2026-01-01",
+     "Saldo de la Base Monetaria": 41.54
+    },
+    {
+     "fecha": "2026-02-01",
+     "Saldo de la Base Monetaria": 35.35
+    },
+    {
+     "fecha": "2026-03-01",
+     "Saldo de la Base Monetaria": 35.19
+    },
+    {
+     "fecha": "2026-04-01",
+     "Saldo de la Base Monetaria": 28.85
+    },
+    {
+     "fecha": "2026-05-01",
+     "Saldo de la Base Monetaria": 20.14
+    }
+   ]
+  },
+  {
+   "titulo": "Índice de Precios al Consumidor Nacional (IPC). Base diciembre 2016.",
+   "portal": "API de Series de Tiempo",
+   "url": "https://datos.gob.ar/series/api/series/?ids=148.3_INIVELNAL_DICI_M_26",
+   "total_records": 102,
+   "unidades": "Variación porcentual interanual (en %)",
+   "filas": [
+    {
+     "fecha": "2018-01-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 25.01
+    },
+    {
+     "fecha": "2018-02-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 25.44
+    },
+    {
+     "fecha": "2018-03-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 25.4
+    },
+    {
+     "fecha": "2018-04-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 25.5
+    },
+    {
+     "fecha": "2018-05-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 26.29
+    },
+    {
+     "fecha": "2018-06-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 29.47
+    },
+    {
+     "fecha": "2018-07-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 31.21
+    },
+    {
+     "fecha": "2018-08-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 34.43
+    },
+    {
+     "fecha": "2018-09-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 40.54
+    },
+    {
+     "fecha": "2018-10-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 45.91
+    },
+    {
+     "fecha": "2018-11-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 48.47
+    },
+    {
+     "fecha": "2018-12-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 47.65
+    },
+    {
+     "fecha": "2019-01-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 49.31
+    },
+    {
+     "fecha": "2019-02-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 51.28
+    },
+    {
+     "fecha": "2019-03-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 54.73
+    },
+    {
+     "fecha": "2019-04-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 55.73
+    },
+    {
+     "fecha": "2019-05-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 57.3
+    },
+    {
+     "fecha": "2019-06-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 55.75
+    },
+    {
+     "fecha": "2019-07-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 54.39
+    },
+    {
+     "fecha": "2019-08-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 54.48
+    },
+    {
+     "fecha": "2019-09-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 53.54
+    },
+    {
+     "fecha": "2019-10-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 50.49
+    },
+    {
+     "fecha": "2019-11-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 52.09
+    },
+    {
+     "fecha": "2019-12-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 53.83
+    },
+    {
+     "fecha": "2020-01-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 52.86
+    },
+    {
+     "fecha": "2020-02-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 50.27
+    },
+    {
+     "fecha": "2020-03-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 48.36
+    },
+    {
+     "fecha": "2020-04-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 45.63
+    },
+    {
+     "fecha": "2020-05-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 43.42
+    },
+    {
+     "fecha": "2020-06-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 42.76
+    },
+    {
+     "fecha": "2020-07-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 42.39
+    },
+    {
+     "fecha": "2020-08-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 40.67
+    },
+    {
+     "fecha": "2020-09-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 36.62
+    },
+    {
+     "fecha": "2020-10-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 37.24
+    },
+    {
+     "fecha": "2020-11-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 35.8
+    },
+    {
+     "fecha": "2020-12-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 36.14
+    },
+    {
+     "fecha": "2021-01-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 38.53
+    },
+    {
+     "fecha": "2021-02-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 40.65
+    },
+    {
+     "fecha": "2021-03-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 42.65
+    },
+    {
+     "fecha": "2021-04-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 46.28
+    },
+    {
+     "fecha": "2021-05-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 48.84
+    },
+    {
+     "fecha": "2021-06-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 50.2
+    },
+    {
+     "fecha": "2021-07-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 51.77
+    },
+    {
+     "fecha": "2021-08-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 51.42
+    },
+    {
+     "fecha": "2021-09-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 52.47
+    },
+    {
+     "fecha": "2021-10-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 52.11
+    },
+    {
+     "fecha": "2021-11-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 51.18
+    },
+    {
+     "fecha": "2021-12-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 50.94
+    },
+    {
+     "fecha": "2022-01-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 50.69
+    },
+    {
+     "fecha": "2022-02-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 52.32
+    },
+    {
+     "fecha": "2022-03-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 55.11
+    },
+    {
+     "fecha": "2022-04-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 58.04
+    },
+    {
+     "fecha": "2022-05-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 60.68
+    },
+    {
+     "fecha": "2022-06-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 63.98
+    },
+    {
+     "fecha": "2022-07-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 71.0
+    },
+    {
+     "fecha": "2022-08-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 78.52
+    },
+    {
+     "fecha": "2022-09-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 83.03
+    },
+    {
+     "fecha": "2022-10-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 88.04
+    },
+    {
+     "fecha": "2022-11-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 92.41
+    },
+    {
+     "fecha": "2022-12-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 94.79
+    },
+    {
+     "fecha": "2023-01-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 98.83
+    },
+    {
+     "fecha": "2023-02-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 102.5
+    },
+    {
+     "fecha": "2023-03-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 104.3
+    },
+    {
+     "fecha": "2023-04-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 108.83
+    },
+    {
+     "fecha": "2023-05-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 114.25
+    },
+    {
+     "fecha": "2023-06-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 115.58
+    },
+    {
+     "fecha": "2023-07-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 113.45
+    },
+    {
+     "fecha": "2023-08-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 124.37
+    },
+    {
+     "fecha": "2023-09-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 138.28
+    },
+    {
+     "fecha": "2023-10-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 142.66
+    },
+    {
+     "fecha": "2023-11-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 160.92
+    },
+    {
+     "fecha": "2023-12-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 211.41
+    },
+    {
+     "fecha": "2024-01-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 254.25
+    },
+    {
+     "fecha": "2024-02-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 276.22
+    },
+    {
+     "fecha": "2024-03-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 287.87
+    },
+    {
+     "fecha": "2024-04-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 289.4
+    },
+    {
+     "fecha": "2024-05-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 276.41
+    },
+    {
+     "fecha": "2024-06-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 271.53
+    },
+    {
+     "fecha": "2024-07-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 263.45
+    },
+    {
+     "fecha": "2024-08-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 236.72
+    },
+    {
+     "fecha": "2024-09-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 209.0
+    },
+    {
+     "fecha": "2024-10-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 192.99
+    },
+    {
+     "fecha": "2024-11-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 166.03
+    },
+    {
+     "fecha": "2024-12-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 117.76
+    },
+    {
+     "fecha": "2025-01-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 84.54
+    },
+    {
+     "fecha": "2025-02-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 66.87
+    },
+    {
+     "fecha": "2025-03-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 55.93
+    },
+    {
+     "fecha": "2025-04-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 47.26
+    },
+    {
+     "fecha": "2025-05-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 43.48
+    },
+    {
+     "fecha": "2025-06-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 39.42
+    },
+    {
+     "fecha": "2025-07-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 36.57
+    },
+    {
+     "fecha": "2025-08-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 33.56
+    },
+    {
+     "fecha": "2025-09-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 31.76
+    },
+    {
+     "fecha": "2025-10-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 31.31
+    },
+    {
+     "fecha": "2025-11-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 31.37
+    },
+    {
+     "fecha": "2025-12-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 31.55
+    },
+    {
+     "fecha": "2026-01-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 32.41
+    },
+    {
+     "fecha": "2026-02-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 33.05
+    },
+    {
+     "fecha": "2026-03-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 32.61
+    },
+    {
+     "fecha": "2026-04-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 32.35
+    },
+    {
+     "fecha": "2026-05-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 33.2
+    },
+    {
+     "fecha": "2026-06-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 33.55
+    }
+   ]
+  },
+  {
+   "titulo": "Factores de explicación de Base Monetaria",
+   "portal": "API de Series de Tiempo",
+   "url": "https://datos.gob.ar/series/api/series/?ids=331.1_SALDO_BASERIA__15",
+   "total_records": 78,
+   "unidades": "Variación porcentual interanual (en %)",
+   "filas": [
+    {
+     "fecha": "2018-01-01",
+     "Saldo de la Base Monetaria": 16.69
+    },
+    {
+     "fecha": "2018-02-01",
+     "Saldo de la Base Monetaria": 23.1
+    },
+    {
+     "fecha": "2018-03-01",
+     "Saldo de la Base Monetaria": 31.89
+    },
+    {
+     "fecha": "2018-04-01",
+     "Saldo de la Base Monetaria": 25.56
+    },
+    {
+     "fecha": "2018-05-01",
+     "Saldo de la Base Monetaria": 34.79
+    },
+    {
+     "fecha": "2018-06-01",
+     "Saldo de la Base Monetaria": 25.27
+    },
+    {
+     "fecha": "2018-07-01",
+     "Saldo de la Base Monetaria": 28.18
+    },
+    {
+     "fecha": "2018-08-01",
+     "Saldo de la Base Monetaria": 44.12
+    },
+    {
+     "fecha": "2018-09-01",
+     "Saldo de la Base Monetaria": 43.95
+    },
+    {
+     "fecha": "2018-10-01",
+     "Saldo de la Base Monetaria": 32.75
+    },
+    {
+     "fecha": "2018-11-01",
+     "Saldo de la Base Monetaria": 40.73
+    },
+    {
+     "fecha": "2018-12-01",
+     "Saldo de la Base Monetaria": 40.74
+    },
+    {
+     "fecha": "2019-01-01",
+     "Saldo de la Base Monetaria": 40.03
+    },
+    {
+     "fecha": "2019-02-01",
+     "Saldo de la Base Monetaria": 39.9
+    },
+    {
+     "fecha": "2019-03-01",
+     "Saldo de la Base Monetaria": 35.77
+    },
+    {
+     "fecha": "2019-04-01",
+     "Saldo de la Base Monetaria": 40.38
+    },
+    {
+     "fecha": "2019-05-01",
+     "Saldo de la Base Monetaria": 32.92
+    },
+    {
+     "fecha": "2019-06-01",
+     "Saldo de la Base Monetaria": 31.83
+    },
+    {
+     "fecha": "2019-07-01",
+     "Saldo de la Base Monetaria": 25.54
+    },
+    {
+     "fecha": "2019-08-01",
+     "Saldo de la Base Monetaria": 7.27
+    },
+    {
+     "fecha": "2019-09-01",
+     "Saldo de la Base Monetaria": 4.83
+    },
+    {
+     "fecha": "2019-10-01",
+     "Saldo de la Base Monetaria": 20.1
+    },
+    {
+     "fecha": "2019-11-01",
+     "Saldo de la Base Monetaria": 34.93
+    },
+    {
+     "fecha": "2019-12-01",
+     "Saldo de la Base Monetaria": 34.52
+    },
+    {
+     "fecha": "2020-01-01",
+     "Saldo de la Base Monetaria": 26.32
+    },
+    {
+     "fecha": "2020-02-01",
+     "Saldo de la Base Monetaria": 22.31
+    },
+    {
+     "fecha": "2020-03-01",
+     "Saldo de la Base Monetaria": 69.59
+    },
+    {
+     "fecha": "2020-04-01",
+     "Saldo de la Base Monetaria": 33.09
+    },
+    {
+     "fecha": "2020-05-01",
+     "Saldo de la Base Monetaria": 57.12
+    },
+    {
+     "fecha": "2020-06-01",
+     "Saldo de la Base Monetaria": 57.33
+    },
+    {
+     "fecha": "2020-07-01",
+     "Saldo de la Base Monetaria": 81.36
+    },
+    {
+     "fecha": "2020-08-01",
+     "Saldo de la Base Monetaria": 76.46
+    },
+    {
+     "fecha": "2020-09-01",
+     "Saldo de la Base Monetaria": 82.72
+    },
+    {
+     "fecha": "2020-10-01",
+     "Saldo de la Base Monetaria": 60.39
+    },
+    {
+     "fecha": "2020-11-01",
+     "Saldo de la Base Monetaria": 33.24
+    },
+    {
+     "fecha": "2020-12-01",
+     "Saldo de la Base Monetaria": 30.33
+    },
+    {
+     "fecha": "2021-01-01",
+     "Saldo de la Base Monetaria": 45.2
+    },
+    {
+     "fecha": "2021-02-01",
+     "Saldo de la Base Monetaria": 40.37
+    },
+    {
+     "fecha": "2021-03-01",
+     "Saldo de la Base Monetaria": 6.12
+    },
+    {
+     "fecha": "2021-04-01",
+     "Saldo de la Base Monetaria": 26.94
+    },
+    {
+     "fecha": "2021-05-01",
+     "Saldo de la Base Monetaria": 18.11
+    },
+    {
+     "fecha": "2021-06-01",
+     "Saldo de la Base Monetaria": 26.38
+    },
+    {
+     "fecha": "2021-07-01",
+     "Saldo de la Base Monetaria": 14.58
+    },
+    {
+     "fecha": "2021-08-01",
+     "Saldo de la Base Monetaria": 25.34
+    },
+    {
+     "fecha": "2021-09-01",
+     "Saldo de la Base Monetaria": 22.84
+    },
+    {
+     "fecha": "2021-10-01",
+     "Saldo de la Base Monetaria": 35.25
+    },
+    {
+     "fecha": "2021-11-01",
+     "Saldo de la Base Monetaria": 40.81
+    },
+    {
+     "fecha": "2021-12-01",
+     "Saldo de la Base Monetaria": 47.92
+    },
+    {
+     "fecha": "2022-01-01",
+     "Saldo de la Base Monetaria": 46.34
+    },
+    {
+     "fecha": "2022-02-01",
+     "Saldo de la Base Monetaria": 52.44
+    },
+    {
+     "fecha": "2022-03-01",
+     "Saldo de la Base Monetaria": 44.46
+    },
+    {
+     "fecha": "2022-04-01",
+     "Saldo de la Base Monetaria": 46.02
+    },
+    {
+     "fecha": "2022-05-01",
+     "Saldo de la Base Monetaria": 49.68
+    },
+    {
+     "fecha": "2022-06-01",
+     "Saldo de la Base Monetaria": 44.32
+    },
+    {
+     "fecha": "2022-07-01",
+     "Saldo de la Base Monetaria": 55.12
+    },
+    {
+     "fecha": "2022-08-01",
+     "Saldo de la Base Monetaria": 47.16
+    },
+    {
+     "fecha": "2022-09-01",
+     "Saldo de la Base Monetaria": 39.41
+    },
+    {
+     "fecha": "2022-10-01",
+     "Saldo de la Base Monetaria": 42.85
+    },
+    {
+     "fecha": "2022-11-01",
+     "Saldo de la Base Monetaria": 43.74
+    },
+    {
+     "fecha": "2022-12-01",
+     "Saldo de la Base Monetaria": 42.41
+    },
+    {
+     "fecha": "2023-01-01",
+     "Saldo de la Base Monetaria": 46.42
+    },
+    {
+     "fecha": "2023-02-01",
+     "Saldo de la Base Monetaria": 42.16
+    },
+    {
+     "fecha": "2023-03-01",
+     "Saldo de la Base Monetaria": 52.81
+    },
+    {
+     "fecha": "2023-04-01",
+     "Saldo de la Base Monetaria": 55.07
+    },
+    {
+     "fecha": "2023-05-01",
+     "Saldo de la Base Monetaria": 48.0
+    },
+    {
+     "fecha": "2023-06-01",
+     "Saldo de la Base Monetaria": 49.09
+    },
+    {
+     "fecha": "2023-07-01",
+     "Saldo de la Base Monetaria": 48.08
+    },
+    {
+     "fecha": "2023-08-01",
+     "Saldo de la Base Monetaria": 56.96
+    },
+    {
+     "fecha": "2023-09-01",
+     "Saldo de la Base Monetaria": 66.58
+    },
+    {
+     "fecha": "2023-10-01",
+     "Saldo de la Base Monetaria": 68.35
+    },
+    {
+     "fecha": "2023-11-01",
+     "Saldo de la Base Monetaria": 99.07
+    },
+    {
+     "fecha": "2023-12-01",
+     "Saldo de la Base Monetaria": 84.64
+    },
+    {
+     "fecha": "2024-01-01",
+     "Saldo de la Base Monetaria": 105.46
+    },
+    {
+     "fecha": "2024-02-01",
+     "Saldo de la Base Monetaria": 101.95
+    },
+    {
+     "fecha": "2024-03-01",
+     "Saldo de la Base Monetaria": 132.12
+    },
+    {
+     "fecha": "2024-04-01",
+     "Saldo de la Base Monetaria": 154.77
+    },
+    {
+     "fecha": "2024-05-01",
+     "Saldo de la Base Monetaria": 207.58
+    },
+    {
+     "fecha": "2024-06-01",
+     "Saldo de la Base Monetaria": 242.9
+    }
+   ]
+  },
+  {
+   "titulo": "Índice de Precios al Consumidor Nacional (IPC). Base diciembre 2016.",
+   "portal": "API de Series de Tiempo",
+   "url": "https://datos.gob.ar/series/api/series/?ids=148.3_INIVELNAL_DICI_M_26",
+   "total_records": 78,
+   "unidades": "Variación porcentual interanual (en %)",
+   "filas": [
+    {
+     "fecha": "2018-01-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 25.01
+    },
+    {
+     "fecha": "2018-02-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 25.44
+    },
+    {
+     "fecha": "2018-03-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 25.4
+    },
+    {
+     "fecha": "2018-04-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 25.5
+    },
+    {
+     "fecha": "2018-05-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 26.29
+    },
+    {
+     "fecha": "2018-06-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 29.47
+    },
+    {
+     "fecha": "2018-07-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 31.21
+    },
+    {
+     "fecha": "2018-08-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 34.43
+    },
+    {
+     "fecha": "2018-09-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 40.54
+    },
+    {
+     "fecha": "2018-10-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 45.91
+    },
+    {
+     "fecha": "2018-11-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 48.47
+    },
+    {
+     "fecha": "2018-12-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 47.65
+    },
+    {
+     "fecha": "2019-01-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 49.31
+    },
+    {
+     "fecha": "2019-02-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 51.28
+    },
+    {
+     "fecha": "2019-03-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 54.73
+    },
+    {
+     "fecha": "2019-04-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 55.73
+    },
+    {
+     "fecha": "2019-05-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 57.3
+    },
+    {
+     "fecha": "2019-06-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 55.75
+    },
+    {
+     "fecha": "2019-07-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 54.39
+    },
+    {
+     "fecha": "2019-08-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 54.48
+    },
+    {
+     "fecha": "2019-09-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 53.54
+    },
+    {
+     "fecha": "2019-10-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 50.49
+    },
+    {
+     "fecha": "2019-11-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 52.09
+    },
+    {
+     "fecha": "2019-12-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 53.83
+    },
+    {
+     "fecha": "2020-01-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 52.86
+    },
+    {
+     "fecha": "2020-02-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 50.27
+    },
+    {
+     "fecha": "2020-03-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 48.36
+    },
+    {
+     "fecha": "2020-04-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 45.63
+    },
+    {
+     "fecha": "2020-05-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 43.42
+    },
+    {
+     "fecha": "2020-06-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 42.76
+    },
+    {
+     "fecha": "2020-07-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 42.39
+    },
+    {
+     "fecha": "2020-08-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 40.67
+    },
+    {
+     "fecha": "2020-09-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 36.62
+    },
+    {
+     "fecha": "2020-10-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 37.24
+    },
+    {
+     "fecha": "2020-11-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 35.8
+    },
+    {
+     "fecha": "2020-12-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 36.14
+    },
+    {
+     "fecha": "2021-01-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 38.53
+    },
+    {
+     "fecha": "2021-02-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 40.65
+    },
+    {
+     "fecha": "2021-03-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 42.65
+    },
+    {
+     "fecha": "2021-04-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 46.28
+    },
+    {
+     "fecha": "2021-05-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 48.84
+    },
+    {
+     "fecha": "2021-06-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 50.2
+    },
+    {
+     "fecha": "2021-07-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 51.77
+    },
+    {
+     "fecha": "2021-08-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 51.42
+    },
+    {
+     "fecha": "2021-09-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 52.47
+    },
+    {
+     "fecha": "2021-10-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 52.11
+    },
+    {
+     "fecha": "2021-11-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 51.18
+    },
+    {
+     "fecha": "2021-12-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 50.94
+    },
+    {
+     "fecha": "2022-01-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 50.69
+    },
+    {
+     "fecha": "2022-02-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 52.32
+    },
+    {
+     "fecha": "2022-03-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 55.11
+    },
+    {
+     "fecha": "2022-04-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 58.04
+    },
+    {
+     "fecha": "2022-05-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 60.68
+    },
+    {
+     "fecha": "2022-06-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 63.98
+    },
+    {
+     "fecha": "2022-07-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 71.0
+    },
+    {
+     "fecha": "2022-08-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 78.52
+    },
+    {
+     "fecha": "2022-09-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 83.03
+    },
+    {
+     "fecha": "2022-10-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 88.04
+    },
+    {
+     "fecha": "2022-11-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 92.41
+    },
+    {
+     "fecha": "2022-12-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 94.79
+    },
+    {
+     "fecha": "2023-01-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 98.83
+    },
+    {
+     "fecha": "2023-02-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 102.5
+    },
+    {
+     "fecha": "2023-03-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 104.3
+    },
+    {
+     "fecha": "2023-04-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 108.83
+    },
+    {
+     "fecha": "2023-05-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 114.25
+    },
+    {
+     "fecha": "2023-06-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 115.58
+    },
+    {
+     "fecha": "2023-07-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 113.45
+    },
+    {
+     "fecha": "2023-08-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 124.37
+    },
+    {
+     "fecha": "2023-09-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 138.28
+    },
+    {
+     "fecha": "2023-10-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 142.66
+    },
+    {
+     "fecha": "2023-11-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 160.92
+    },
+    {
+     "fecha": "2023-12-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 211.41
+    },
+    {
+     "fecha": "2024-01-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 254.25
+    },
+    {
+     "fecha": "2024-02-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 276.22
+    },
+    {
+     "fecha": "2024-03-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 287.87
+    },
+    {
+     "fecha": "2024-04-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 289.4
+    },
+    {
+     "fecha": "2024-05-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 276.41
+    },
+    {
+     "fecha": "2024-06-01",
+     "IPC. Nivel General Nacional. Base dic 2016. Mensual.": 271.53
+    }
+   ]
+  }
+ ]
+}

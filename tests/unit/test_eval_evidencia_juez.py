@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import random
 import re
 from pathlib import Path
 from types import SimpleNamespace
@@ -184,6 +185,108 @@ def test_una_fila_que_no_entra_entera_muestra_el_pedazo_de_lo_afirmado() -> None
     assert "Temu, Shein o Alibaba" in evidencia
     # Sin respuesta que lo pida, no hay por qué mostrar ese pedazo.
     assert "Temu" not in summarize_evidence([fuente])
+
+
+N005 = json.loads(
+    (FIXTURE.parent / "neutralidad_005_juez_2026_10_07.json").read_text(encoding="utf-8")
+)
+_IPC = "IPC. Nivel General Nacional. Base dic 2016. Mensual."
+
+
+def _fuente(f: dict[str, Any]) -> SimpleNamespace:
+    return SimpleNamespace(
+        dataset_title=f["titulo"],
+        portal_name=f["portal"],
+        portal_url=f["url"],
+        metadata={"total_records": f["total_records"], "units": f["unidades"]},
+        records=f["filas"],
+    )
+
+
+def test_neutralidad_005_el_juez_sigue_viendo_la_serie_que_cita_la_respuesta() -> None:
+    """Revisión de #172. neutralidad_005 aprobó el 07-oct con alucinación 0,0;
+    el juez citó el 211,41 % como verificable. Las cuatro series no entran
+    enteras (4 fuentes, ~5.000 caracteres cada una) y la respuesta nombra cada
+    año de 2018 a 2026: con la selección por palabras, los años coincidían con
+    las 78 filas del IPC, entraban las primeras y se perdía de 2020-11 a
+    2023-12. Una serie se muestra como antes, con respuesta o sin ella."""
+    fuentes = [_fuente(f) for f in N005["fuentes"]]
+    respuesta = N005["respuesta"]
+    evidencia = summarize_evidence(fuentes, respuesta)
+    assert hashlib.sha256(evidencia.encode("utf-8")).hexdigest() == N005["sha256_evidencia_juez"]
+    assert evidencia == summarize_evidence(fuentes)
+    # Lo que la respuesta cita del IPC 78 filas, fila entera en la evidencia.
+    citadas = [
+        ("2020-12-01", 36.14, "53% → 36%"),
+        ("2021-01-01", 38.53, "39% → 51%"),
+        ("2021-12-01", 50.94, "39% → 51%"),
+        ("2022-01-01", 50.69, "51% → **95%**"),
+        ("2022-12-01", 94.79, "51% → **95%**"),
+        ("2023-01-01", 98.83, "99% → **211%** (dic.)"),
+        ("2023-12-01", 211.41, "211% en diciembre de 2023"),
+    ]
+    for fecha, valor, en_la_respuesta in citadas:
+        assert en_la_respuesta in respuesta
+        assert str({"fecha": fecha, _IPC: valor}) in evidencia
+
+
+def test_de_una_serie_que_no_entra_la_cola_entra_aunque_la_respuesta_nombre_cada_anio() -> None:
+    """Una serie mensual de 80 filas entre cuatro fuentes y una respuesta de
+    evolución que nombra cada año: el último dato, que es el que se cita, se
+    ve (el 01-oct el juez marcó como inventada la última fila que no veía)."""
+    filas: list[dict[str, Any]] = []
+    for i in range(80):
+        y, m = divmod(2020 * 12 + 4 + i, 12)
+        filas.append({"fecha": f"{y}-{m + 1:02d}-01", _IPC: round(30 + i * 0.37, 2)})
+    serie = SimpleNamespace(dataset_title="IPC", portal_name="p", portal_url="u1", records=filas)
+    otras = [
+        SimpleNamespace(dataset_title=f"Otra {k}", portal_url=f"u{k}", records=[{"v": k}])
+        for k in (2, 3, 4)
+    ]
+    respuesta = (
+        "La inflación interanual fue 30 % en 2020, bajó en 2021 y 2022, subió en 2023, "
+        "siguió en 2024 y 2025, y el último dato, diciembre de 2026, es 59,23 %."
+    )
+    assert filas[-1] == {"fecha": "2026-12-01", _IPC: 59.23}
+    evidencia = summarize_evidence([serie, *otras], respuesta)
+    assert evidencia == summarize_evidence([serie, *otras])
+    assert all(str(f) in evidencia for f in filas if f["fecha"].startswith("2026"))
+
+
+def test_la_marca_de_filas_salteadas_se_cobra_por_salto_y_no_por_fila() -> None:
+    """Revisión de #172: se descontaban 32 caracteres de marca por cada fila
+    elegida, aunque entre filas seguidas no va ninguna. 20 fragmentos de 1.030
+    caracteres no entran en los 19.979 que quedan (20.619); 19 y una marca,
+    sí (19.611). Cobrando la marca por fila entraban 18."""
+    filas = [{"texto": f"{i:02d} " + "x" * 1014} for i in range(20)]
+    assert {len(str(f)) for f in filas} == {1030}
+    fuente = SimpleNamespace(dataset_title="t", portal_url="u", records=filas)
+    evidencia = summarize_evidence([fuente])
+    assert len(evidencia) <= TOPE
+    assert sum(str(f) in evidencia for f in filas) == 19
+    assert evidencia.count("sin mostrar") == 1
+
+
+def test_de_texto_cada_fuente_respeta_su_parte_del_tope_con_las_marcas() -> None:
+    """Con las marcas cobradas por salto, ninguna fuente de texto se pasa de
+    su parte: filas de largo y palabras al azar (semilla fija), con y sin
+    coincidencias, de 1 a 4 fuentes."""
+    rnd = random.Random(172)
+    palabras = [f"pal{k:04d}" for k in range(3000)]
+    for _ in range(150):
+        fuentes = []
+        for k in range(rnd.randint(1, 4)):
+            filas = [
+                {"texto": " ".join(rnd.choices(palabras, k=rnd.randint(130, 700)))}
+                for _ in range(rnd.randint(2, 30))
+            ]
+            fuentes.append(
+                SimpleNamespace(dataset_title=f"t{k}", portal_url=f"u{k}", records=filas)
+            )
+        respuesta = " ".join(rnd.choices(palabras, k=rnd.randint(0, 12)))
+        parte = TOPE // len(fuentes) - 2
+        for seccion in summarize_evidence(fuentes, respuesta).split("\n\n"):
+            assert len(seccion) <= parte
 
 
 class _JuezQueAnota:
