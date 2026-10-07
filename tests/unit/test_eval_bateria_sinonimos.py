@@ -9,7 +9,13 @@ Tres respuestas correctas fallaron sólo por una palabra clave:
 
 Las cifras de las tres se cotejaron con la fuente pública (BCRA v4, DolarApi y
 API de Series de Tiempo). Los patrones aceptan ahora el sinónimo inequívoco, y
-cada uno sigue rechazando una respuesta que habla de otra cosa.
+cada uno sigue rechazando una respuesta que habla de otra cosa. En
+``series_002`` entra también la Comunicación A 3500, el único nombre del dólar
+que daba una respuesta correcta del 05-oct.
+
+Ninguno de los tres casos controla cifras. En ``series_006`` eso deja pasar una
+respuesta que nombra al EMAE y da otro indicador: lo marca el ``xfail`` del
+final, que queda así hasta que se decida si el caso lleva un oráculo.
 
 ``ckan_004`` (256 diputados contra 257) no es de estos: la HCDN publica 257
 diputados en ejercicio y el 256 sale de una copia vieja de la composición por
@@ -92,6 +98,17 @@ def test_el_patron_sigue_rechazando_una_respuesta_sobre_otra_cosa(case: str, tex
             "series_002",
             "El tipo de cambio oficial:\n\n| Mes | Mayorista ($/USD) |\n| Diciembre | 1.459,42 |",
         ),
+        # La respuesta correcta del 05-oct (integ_correct_sub_x2.json, corrida 0),
+        # recortada: el resto tampoco nombra la moneda. Sólo la identifica la
+        # Comunicación A 3500 del BCRA, que es el dólar mayorista de referencia.
+        (
+            "series_002",
+            "El tipo de cambio oficial **arrancó 2025 en torno a $1.062 (minorista) y cerró "
+            "el año en $1.479**, según los datos del BCRA. A continuación, el cierre de cada "
+            "mes:\n\n| Mes | Minorista (vend.) | Mayorista (A 3500) |\n|---|---|---|\n"
+            "| Enero | $1.079,63 | $1.053,50 |\n| Diciembre | $1.479,28 | $1.459,42 |",
+        ),
+        ("series_002", "El tipo de cambio oficial mayorista (A3500) cerró 2025 en $1.459,42."),
         ("argentina_datos_003", "El CCL cotiza hoy a $1.610,80."),
         ("argentina_datos_003", "El Contado con Liquidación cotiza hoy a $1.610,80."),
         ("argentina_datos_003", "El contado con liquidacion cotiza hoy a $1.610,80."),
@@ -105,3 +122,26 @@ def test_el_patron_sigue_rechazando_una_respuesta_sobre_otra_cosa(case: str, tex
 )
 def test_las_variantes_del_mismo_nombre_aprueban(case: str, texto: str) -> None:
     assert _palabras_clave_ok(case, texto)
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "series_006 sólo pide nombrar el indicador y no controla ninguna cifra: una "
+        "respuesta que nombra al EMAE y da otro indicador aprueba. Frenarla exige el "
+        "oráculo serie_variacion_interanual sobre 143.3_NO_PR_2004_A_21, que además "
+        "rechaza las respuestas trimestrales y las que dan sólo niveles: decisión pendiente."
+    ),
+)
+def test_series_006_rechaza_una_sustitucion_que_nombra_al_emae() -> None:
+    """La misma corrida del 06-oct (fuentes y evidencia) con otro texto y sin
+    jueces: lo que miran los chequeos fijos. Antes de este PR la frenaba, de
+    casualidad, la palabra "actividad"; una sustitución que la escribiera
+    ("la actividad industrial cayó…") también aprobaba."""
+    run = {k: v for k, v in RUNS["series_006"].items() if k != "judge"}
+    run["answer"] = (
+        "El EMAE de 2026 todavía no se publicó. El IPI manufacturero cayó 2,2 % "
+        "interanual en julio de 2026."
+    )
+    quality = score_run(ENTRIES["series_006"], run, None, JudgeThresholds())
+    assert not quality["passed"]
