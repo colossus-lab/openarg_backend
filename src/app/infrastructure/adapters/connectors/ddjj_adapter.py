@@ -39,6 +39,7 @@ from typing import Any
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.application.ddjj import organismos
 from app.domain.entities.connectors.data_result import DataResult
 
 logger = logging.getLogger(__name__)
@@ -386,8 +387,26 @@ class DDJJAdapter:
             params["poder"] = poder
             condiciones.append("poder = :poder")
         if organismo:
-            params["organismo"] = f"%{_escapar_like(_sin_tildes(organismo))}%"
-            condiciones.append(f"{_SIN_TILDES.format(col='organismo')} LIKE :organismo")
+            # Siglas y nombres viejos (ARCA/AFIP) o palabras enteras: ver
+            # application/ddjj/organismos.py. El nombre se normaliza igual que ahí:
+            # sin tildes y con la puntuación como espacio.
+            columna = (
+                "regexp_replace("
+                + _SIN_TILDES.format(col="organismo")
+                + ", '[^A-Z0-9 ]+', ' ', 'g')"
+            )
+            cond = organismos.condicion(organismo)
+            if cond.patrones:
+                opciones = []
+                for i, patron in enumerate(cond.patrones):
+                    params[f"org{i}"] = patron
+                    opciones.append(f"{columna} LIKE :org{i}")
+                condiciones.append("(" + " OR ".join(opciones) + ")")
+            for i, expresion in enumerate(cond.regex):
+                params[f"orgre{i}"] = expresion
+                condiciones.append(f"{columna} ~ :orgre{i}")
+            if not cond.patrones and not cond.regex:
+                condiciones.append("false")
         for i, patron in enumerate(_patrones_cargo(cargo or "")):
             params[f"cargo{i}"] = patron
             condiciones.append(f"ltrim({_SIN_TILDES.format(col='cargo')}) LIKE :cargo{i}")

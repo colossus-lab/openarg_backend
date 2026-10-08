@@ -312,3 +312,70 @@ async def test_evolucion(ddjj):
 async def test_cobertura_y_conteo(ddjj):
     assert await ddjj.cobertura() == {da.FUENTE_OA: (2022, 2024), da.FUENTE_CABA: (2026, 2026)}
     assert await ddjj.contar() == len(FILAS)
+
+
+async def test_organismo_por_sigla_y_por_palabra_entera(ddjj):
+    """ARCA trae los dos nombres (el nuevo y el de AFIP) y no lo que sólo contiene
+    las letras: "UNIVERSIDAD NACIONAL DE CATAMARCA" entraba con el LIKE de antes."""
+    engine = _engine_or_skip()
+    extra = [
+        _decl(
+            201,
+            "UNO ARCA",
+            cuit="20000000201",
+            anio=2019,
+            patrimonio=30 * M,
+            cargo="Inspector",
+            poder="ejecutivo",
+            organismo="AGENCIA DE RECAUDACION Y CONTROL ADUANERO",
+        ),
+        _decl(
+            202,
+            "DOS AFIP",
+            cuit="20000000202",
+            anio=2019,
+            patrimonio=20 * M,
+            cargo="Inspector",
+            poder="ejecutivo",
+            organismo="ADMINISTRACION FEDERAL DE INGRESOS PUBLICOS",
+        ),
+        _decl(
+            203,
+            "TRES CATAMARCA",
+            cuit="20000000203",
+            anio=2019,
+            patrimonio=90 * M,
+            cargo="Docente",
+            poder="ejecutivo",
+            organismo="UNIVERSIDAD NACIONAL DE CATAMARCA",
+        ),
+        _decl(
+            204,
+            "CUATRO TRABAJO",
+            cuit="20000000204",
+            anio=2019,
+            patrimonio=10 * M,
+            cargo="Director",
+            poder="ejecutivo",
+            organismo="MINISTERIO DE TRABAJO -EMPLEO Y SEGURIDAD SOCIAL",
+        ),
+    ]
+    with engine.begin() as conn:
+        for fila in extra:
+            cols = ", ".join(fila)
+            conn.execute(
+                text(
+                    f'INSERT INTO raw."{dt.TABLA_DECLARACIONES}" ({cols}) '
+                    f"VALUES ({', '.join(':' + c for c in fila)})"
+                ),
+                fila,
+            )
+    for pedido in ("ARCA", "afip", "la AFIP"):
+        result = await ddjj.ranking("patrimonio", 10, anio=2019, organismo=pedido)
+        assert _nombres(result) == ["UNO ARCA", "DOS AFIP"], pedido
+    trabajo = await ddjj.ranking("patrimonio", 10, anio=2019, organismo="ministerio de trabajo")
+    assert _nombres(trabajo) == ["CUATRO TRABAJO"]
+    catamarca = await ddjj.stats(anio=2019, organismo="universidad catamarca")
+    assert catamarca.records[0]["total"] == 1
+    nada = await ddjj.ranking("patrimonio", 10, anio=2019, organismo="ANSES")
+    assert nada.records == []
