@@ -33,6 +33,12 @@ Uso, desde la raíz del repo::
 mandarlo por stdin a un contenedor que no tiene ``tests/``. Sin ``--json``
 imprime el resumen legible. El gold set está en ``search_gold.json``.
 
+``--repeticiones 3`` corre cada caso tres veces, con un embedding nuevo cada
+vez (Bedrock no devuelve el mismo vector dos veces), y ``--tope-exacta-ms 1``
+corta siempre la caída a la exacta: mide lo que se sirve con caché fría o con
+carga, cuando la exacta no llega (revisión del #183). Van después del
+``python -`` del contenedor, como ``--json``.
+
 Criterios (RC11 del plan): hit@3 ≥ 90 % de las positivas; ≥ 90 % de las
 negativas sin ningún resultado por encima de ``umbral_negativo``; p95 de
 1,5 s o menos.
@@ -61,14 +67,19 @@ _EMBEDDED_GOLD: str | None = None
 
 
 def matches(spec: dict[str, Any], result: dict[str, Any], *, require_tables: bool = True) -> bool:
-    """¿Un resultado (título, portal, tablas) es el dataset esperado?"""
+    """¿Un resultado (título, portal, tablas) es el dataset esperado?
+
+    Un esperado con ``cuenta_sin_filas`` cuenta sin tablas con filas: es una
+    consulta que mide la búsqueda (un recorrido que queda atrapado), sobre un
+    dataset cuyas tablas no tienen filas en staging.
+    """
     if not re.search(spec["titulo"], result.get("titulo") or "", re.IGNORECASE):
         return False
     portales = spec.get("portal")
     if portales and (result.get("portal") or "") not in portales:
         return False
     tablas = result.get("tablas") or []
-    if require_tables and not tablas:
+    if require_tables and not tablas and not spec.get("cuenta_sin_filas"):
         return False
     if spec.get("tabla"):
         return any(re.search(spec["tabla"], t, re.IGNORECASE) for t in tablas)
@@ -127,7 +138,8 @@ def summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
             "negativas_ok": round(sum(1 for r in neg if r[entry]["ok"]) / len(neg), 3)
             if neg
             else None,
-            "fallan": [r["id"] for r in pos + neg if not r[entry]["ok"]],
+            # Con --repeticiones un caso aparece varias veces: se nombra una.
+            "fallan": list(dict.fromkeys(r["id"] for r in pos + neg if not r[entry]["ok"])),
         }
     lat = [r["ms"] for r in rows if r.get("ms") is not None]
     top_pos = [r["top_score"] for r in rows if not r["negativo"] and r.get("top_score") is not None]
@@ -181,6 +193,31 @@ def assemble_mcp(
     return out
 
 
+def expand_cases(casos: list[dict[str, Any]], repeticiones: int) -> list[dict[str, Any]]:
+    """Cada caso ``repeticiones`` veces seguidas (``--repeticiones``).
+
+    Bedrock no devuelve el mismo vector dos veces para el mismo texto
+    (diferencia máxima ~0,0025, staging 08-oct), y eso alcanza para que un
+    recorrido quede atrapado con un embedding y no con otro ("votaciones
+    nominales" con 400 candidatos: 4 de 5). Una sola corrida no lo ve.
+    """
+    return [c for c in casos for _ in range(max(1, repeticiones))]
+
+
+def force_exact_cap(adapter_cls: Any, ms: int | None) -> None:
+    """``--tope-exacta-ms``: la caída a la exacta con otro tope.
+
+    Con 1 se corta siempre, y se mide lo que se sirve cuando la exacta no
+    llega (caché fría, carga): lo que pidió la revisión del #183. Si el
+    adaptador cambia el nombre del tope, esto falla en vez de no hacer nada.
+    """
+    if ms is None:
+        return
+    if not hasattr(adapter_cls, "_EXACT_FALLBACK_TIMEOUT_MS"):
+        raise SystemExit("el adaptador no tiene _EXACT_FALLBACK_TIMEOUT_MS")
+    adapter_cls._EXACT_FALLBACK_TIMEOUT_MS = ms
+
+
 def load_gold() -> dict[str, Any]:
     if _EMBEDDED_GOLD is not None:
         data: dict[str, Any] = json.loads(_EMBEDDED_GOLD)
@@ -215,7 +252,9 @@ def _read_only(sync_engine: Any) -> None:
         conn.exec_driver_sql("SET TRANSACTION READ ONLY")
 
 
-async def _run(gold: dict[str, Any], limite: int) -> list[dict[str, Any]]:
+async def _run(
+    gold: dict[str, Any], limite: int, tope_exacta_ms: int | None = None
+) -> list[dict[str, Any]]:
     from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 
     from app.application.answers.tools.base import ToolContext
@@ -226,6 +265,7 @@ async def _run(gold: dict[str, Any], limite: int) -> list[dict[str, Any]]:
     from app.presentation.http.controllers.public_api import catalogo_router as router
     from app.setup.config.settings import AppSettings
 
+    force_exact_cap(PgVectorSearchAdapter, tope_exacta_ms)
     settings = AppSettings()
     embedding = BedrockEmbeddingAdapter(
         region=settings.bedrock.REGION,
@@ -321,6 +361,17 @@ def main() -> None:
     p.add_argument("--json", action="store_true", help="salida JSON completa por stdout")
     p.add_argument("--limite", type=int, default=10, help="resultados por consulta (el del MCP)")
     p.add_argument("--ids", help="sólo estos casos (separados por coma)")
+    p.add_argument(
+        "--repeticiones",
+        type=int,
+        default=1,
+        help="cada caso N veces, con un embedding nuevo cada vez",
+    )
+    p.add_argument(
+        "--tope-exacta-ms",
+        type=int,
+        help="tope de la caída a la exacta (1 = siempre cortada); sin esto, el del adaptador",
+    )
     args = p.parse_args()
     if args.bundle:
         # En bytes UTF-8: una consola de Windows (cp1252) no puede con "→".
@@ -330,8 +381,11 @@ def main() -> None:
     if args.ids:
         wanted = set(args.ids.split(","))
         gold = {**gold, "casos": [c for c in gold["casos"] if c["id"] in wanted]}
-    rows = asyncio.run(_run(gold, args.limite))
+    gold = {**gold, "casos": expand_cases(gold["casos"], args.repeticiones)}
+    rows = asyncio.run(_run(gold, args.limite, args.tope_exacta_ms))
     report = {
+        "repeticiones": args.repeticiones,
+        "tope_exacta_ms": args.tope_exacta_ms,
         "umbral_negativo": gold.get("umbral_negativo"),
         "resumen": summarize(rows),
         "casos": rows,
