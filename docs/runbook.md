@@ -298,3 +298,42 @@ primera corrida va a comparar la tabla contra la API y reescribirla si está
 atrás o, en una tasa que se guarda en porcentaje como el desempleo, si quedó
 en fracción.
 
+
+---
+
+## 10. Declaraciones juradas: volver atrás `raw.cache_ddjj_*`
+
+La carga de DDJJ (`ingest_ddjj_oa`, entrada del beat `ingest-ddjj-oa`) reemplaza
+las tres tablas juntas, `cache_ddjj_declaraciones`, `cache_ddjj_bienes` y
+`cache_ddjj_deudas`, y deja las anteriores como `<tabla>__previa`. Igual que en
+las series, hay una sola previa por tabla y la siguiente escritura la pisa.
+Cada corrida queda anotada en `public.ddjj_cargas`, con el plan (qué archivo de
+la Oficina Anticorrupción se usó para cada año y qué cortes se descartaron) y
+las filas por año.
+
+1. Frenar la carga: `OPENARG_BEAT_DESACTIVADAS=ingest-ddjj-oa` en el `.env` y
+   recrear `beat`. Si no, el lunes siguiente vuelve a escribir.
+2. Intercambiar las tres juntas, en una transacción. Las tres son de la misma
+   carga, y el detalle se une a las declaraciones por `dj_id`.
+
+   ```sql
+   BEGIN;
+   ALTER TABLE raw."cache_ddjj_declaraciones" RENAME TO "cache_ddjj_declaraciones__tmp";
+   ALTER TABLE raw."cache_ddjj_declaraciones__previa" RENAME TO "cache_ddjj_declaraciones";
+   ALTER TABLE raw."cache_ddjj_declaraciones__tmp" RENAME TO "cache_ddjj_declaraciones__previa";
+   ALTER TABLE raw."cache_ddjj_bienes" RENAME TO "cache_ddjj_bienes__tmp";
+   ALTER TABLE raw."cache_ddjj_bienes__previa" RENAME TO "cache_ddjj_bienes";
+   ALTER TABLE raw."cache_ddjj_bienes__tmp" RENAME TO "cache_ddjj_bienes__previa";
+   ALTER TABLE raw."cache_ddjj_deudas" RENAME TO "cache_ddjj_deudas__tmp";
+   ALTER TABLE raw."cache_ddjj_deudas__previa" RENAME TO "cache_ddjj_deudas";
+   ALTER TABLE raw."cache_ddjj_deudas__tmp" RENAME TO "cache_ddjj_deudas__previa";
+   COMMIT;
+   ```
+
+   Los índices quedan con los nombres de antes del intercambio. No hace falta
+   renombrarlos: la carga siguiente borra la previa con sus índices antes de
+   poner los nombres canónicos.
+3. La carga no vuelve a bajar nada mientras la fuente no cambie: compara el
+   manifiesto de CKAN con el de la última carga `escrita`. Para que reescriba
+   después de arreglar lo que hizo mala la carga descartada, correrla a mano
+   con `forzar=True`.

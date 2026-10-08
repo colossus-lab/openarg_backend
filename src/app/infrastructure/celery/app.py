@@ -123,6 +123,7 @@ def create_celery() -> Celery:
             "app.infrastructure.celery.tasks.senado_staff_tasks",
             "app.infrastructure.celery.tasks.georef_tasks",
             "app.infrastructure.celery.tasks.series_tiempo_tasks",
+            "app.infrastructure.celery.tasks.ddjj_tasks",
             "app.infrastructure.celery.tasks.mapa_estado_tasks",
             "app.infrastructure.celery.tasks.gobernadores_tasks",
             "app.infrastructure.celery.tasks.orchestrator_tasks",
@@ -202,6 +203,7 @@ def create_celery() -> Celery:
         "openarg.ingest_georef": {"queue": "ingest"},
         "openarg.ingest_series_tiempo": {"queue": "ingest"},
         "openarg.check_series_freshness": {"queue": "ingest"},
+        "openarg.ingest_ddjj_oa": {"queue": "ingest"},
         "openarg.run_pipeline": {"queue": "scraper"},
         "openarg.scrape_mapa_estado": {"queue": "scraper"},
         "openarg.scrape_gobernadores": {"queue": "scraper"},
@@ -892,6 +894,15 @@ def create_celery() -> Celery:
                 # atrasada (bug nuestro) de la fuente atrasada.
                 "task": "openarg.check_series_freshness",
                 "schedule": crontab(hour=19, minute=30),  # 19:30 ART
+                "options": {"queue": "ingest"},
+            },
+            "ingest-ddjj-oa": {
+                # Semanal, lunes 4:30 ART. La Oficina Anticorrupción publica una
+                # vez por año (septiembre-octubre), así que casi siempre es un
+                # solo pedido a CKAN: si los recursos no cambiaron desde la
+                # última carga escrita, no baja nada.
+                "task": "openarg.ingest_ddjj_oa",
+                "schedule": crontab(day_of_week=1, hour=4, minute=30),
                 "options": {"queue": "ingest"},
             },
             "scrape-mapa-estado": {
