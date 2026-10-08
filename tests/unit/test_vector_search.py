@@ -381,13 +381,16 @@ def _scripted_session(
     walk_error: Exception | None = None,
     exact_error: BaseException | None = None,
     savepoint_rollback_error: Exception | None = None,
+    wide_rows: list | None = None,
 ) -> AsyncMock:
     """Session double that answers by statement, with Postgres' transaction rules.
 
     The version lookup gets ``extversion``; reading ``enable_seqscan`` gets
     ``seqscan``; the HNSW search (the one with ``LIMIT :candidates``) gets
-    ``rows``, or raises ``walk_error``; the exact search (grouped over every
-    chunk) gets ``exact_rows``, or raises ``exact_error``.
+    ``rows``, or raises ``walk_error``, and the wider walk (``candidates`` of
+    ``_ANN_WIDE_CANDIDATES``) gets ``wide_rows`` if given (``rows`` if not);
+    the exact search (grouped over every chunk) gets ``exact_rows``, or
+    raises ``exact_error``.
 
     What a statement timeout does to a transaction is modelled too, since it
     is what the savepoint is for: a statement that fails leaves the
@@ -427,7 +430,10 @@ def _scripted_session(
             if walk_error is not None:
                 state["aborted"] = True
                 raise walk_error
-            result.fetchall.return_value = rows or []
+            wide = params["candidates"] == PgVectorSearchAdapter._ANN_WIDE_CANDIDATES
+            result.fetchall.return_value = (
+                wide_rows if wide and wide_rows is not None else rows
+            ) or []
         elif "GROUP BY dc.dataset_id" in sql:
             if exact_error is not None:
                 state["aborted"] = True
@@ -903,6 +909,147 @@ class TestExactFallbackCap:
 
         session.begin_nested.assert_not_awaited()
         assert not any("statement_timeout" in s for s, _ in _statements(session))
+
+
+# "votaciones nominales" on staging, 2026-10-08 (review of #183): with 400
+# candidates some embeddings trap the walk at 0.526 ("Legislativas
+# provinciales 2017"); with 1000 it reaches "Votaciones Nominales" at 0.675.
+_FREED = [_row(200 + i, 0.675 - i * 0.001) for i in range(20)]
+# A walk that stays weak however wide: a query OpenArg has no data for.
+_STILL_WEAK = [_row(300 + i, 0.53 - i * 0.001) for i in range(20)]
+
+
+def _walk_candidates(session: AsyncMock) -> list[int]:
+    return [p["candidates"] for s, p in _statements(session) if "LIMIT :candidates" in s]
+
+
+class TestWideWalk:
+    """A weak top walks again, wider, before the exact search.
+
+    Review of #183: with 400 candidates real queries end trapped, the exact
+    search behind the walk rescued them, and its ceiling made that rescue
+    fail cold or under load. The rescue is now a second walk, which reads
+    the index and not the table: it does not depend on the ceiling."""
+
+    @pytest.fixture(autouse=True)
+    def _fresh_version_cache(self, monkeypatch):
+        monkeypatch.setattr(PgVectorSearchAdapter, "_pgvector_version", None)
+
+    def test_the_wide_walk_is_what_prod_walked_and_wider_than_the_first(self):
+        assert PgVectorSearchAdapter._ANN_WIDE_CANDIDATES == 1000
+        assert PgVectorSearchAdapter._ANN_WIDE_CANDIDATES > PgVectorSearchAdapter._ANN_CANDIDATES
+
+    async def test_a_trapped_walk_is_freed_even_when_the_exact_search_would_be_cut(self, caplog):
+        """The finding itself: the exact search would hit the ceiling (cold
+        cache, load), and what gets served is not the trapped walk."""
+        session = _scripted_session(
+            rows=_WEAK, wide_rows=_FREED, exact_error=_statement_timeout_error()
+        )
+
+        with caplog.at_level(logging.INFO, logger=_ADAPTER_LOGGER):
+            results = await PgVectorSearchAdapter(session).search_datasets_ann([0.1] * 8, limit=20)
+
+        assert [r.dataset_id for r in results] == [r.dataset_id for r in _FREED]
+        assert _walk_candidates(session) == [400, 1000]
+        # The wide walk answered: no exact search, no savepoint.
+        assert _exact_sqls(session) == []
+        session.begin_nested.assert_not_awaited()
+        [record] = [r for r in caplog.records if "hnsw ancho" in r.getMessage()]
+        assert "candidatos=400→1000" in record.getMessage()
+        assert "top=0.520→0.675" in record.getMessage()
+        assert not [r for r in caplog.records if "hnsw→exacta" in r.getMessage()]
+
+    async def test_the_wide_walk_runs_with_seqscan_off_and_puts_it_back_too(self):
+        session = _scripted_session(rows=_WEAK, wide_rows=_FREED)
+
+        await PgVectorSearchAdapter(session).search_datasets_ann([0.1] * 8, limit=20)
+
+        walk = ["lee seqscan", "seqscan off", "recorrido", "seqscan como estaba"]
+        assert [_kind(s) for s, _ in _statements(session)] == [
+            "ef_search",
+            "versión",
+            "iterative",
+            *walk,
+            "ef_search",
+            "iterative",
+            *walk,
+        ]
+
+    async def test_still_weak_after_the_wide_walk_the_exact_search_runs(self):
+        session = _scripted_session(rows=_WEAK, wide_rows=_STILL_WEAK, exact_rows=_EXACT)
+
+        results = await PgVectorSearchAdapter(session).search_datasets_ann([0.1] * 8, limit=20)
+
+        assert [r.dataset_id for r in results] == [r.dataset_id for r in _EXACT]
+        assert _walk_candidates(session) == [400, 1000]
+        # Both walks first, then the exact search in its savepoint.
+        walks_and_exact = [k for k in session.events if k in ("recorrido", "savepoint", "exacta")]
+        assert walks_and_exact == ["recorrido", "recorrido", "savepoint", "exacta"]
+
+    async def test_past_the_cap_the_wide_walks_hits_are_served(self, caplog):
+        """If the exact search is cut, the wider walk's answer is served: it
+        holds the first walk's candidates and more."""
+        session = _scripted_session(
+            rows=_WEAK, wide_rows=_STILL_WEAK, exact_error=_statement_timeout_error()
+        )
+
+        with caplog.at_level(logging.WARNING, logger=_ADAPTER_LOGGER):
+            results = await PgVectorSearchAdapter(session).search_datasets_ann([0.1] * 8, limit=20)
+
+        assert [r.dataset_id for r in results] == [r.dataset_id for r in _STILL_WEAK]
+        assert session.state == {"statement_timeout": _SESSION_TIMEOUT, "aborted": False}
+        [record] = [r for r in caplog.records if "hnsw→exacta" in r.getMessage()]
+        assert "top=0.530" in record.getMessage()
+
+    async def test_a_trusted_walk_walks_once(self):
+        session = _scripted_session(rows=_GOOD[:20], wide_rows=_FREED)
+
+        await PgVectorSearchAdapter(session).search_datasets_ann([0.1] * 8, limit=20)
+
+        assert _walk_candidates(session) == [400]
+
+    async def test_too_few_datasets_go_to_the_exact_search_without_a_second_walk(self):
+        session = _scripted_session(rows=_GOOD[:3], wide_rows=_GOOD[:10], exact_rows=_GOOD[:10])
+
+        results = await PgVectorSearchAdapter(session).search_datasets_ann([0.1] * 8, limit=10)
+
+        assert len(results) == 10
+        assert _walk_candidates(session) == [400]
+        assert len(_exact_sqls(session)) == 1
+
+    async def test_with_a_portal_a_weak_top_goes_to_the_exact_search(self):
+        """A small portal's exact search reads only its chunks."""
+        session = _scripted_session(rows=_WEAK, wide_rows=_FREED, exact_rows=_EXACT)
+
+        results = await PgVectorSearchAdapter(session).search_datasets_ann(
+            [0.1] * 8, limit=20, portal_filter="caba"
+        )
+
+        assert [r.dataset_id for r in results] == [r.dataset_id for r in _EXACT]
+        assert _walk_candidates(session) == [400]
+
+    async def test_without_the_iterative_scan_a_weak_top_does_not_walk_again(self):
+        """Before pgvector 0.8 both walks stop at ef_search: the second one
+        would be the first again."""
+        session = _scripted_session(
+            extversion="0.7.4", rows=_WEAK, wide_rows=_FREED, exact_rows=_EXACT
+        )
+
+        results = await PgVectorSearchAdapter(session).search_datasets_ann([0.1] * 8, limit=20)
+
+        assert [r.dataset_id for r in results] == [r.dataset_id for r in _EXACT]
+        assert _walk_candidates(session) == [400]
+
+    async def test_the_index_search_alone_never_runs_the_exact_search(self):
+        """What the canary measures: the index as callers get it before the
+        exact search."""
+        session = _scripted_session(rows=_WEAK, wide_rows=_STILL_WEAK, exact_rows=_EXACT)
+
+        results = await PgVectorSearchAdapter(session).search_datasets_index([0.1] * 8, limit=10)
+
+        assert [r.dataset_id for r in results] == [r.dataset_id for r in _STILL_WEAK]
+        assert _walk_candidates(session) == [400, 1000]
+        assert _exact_sqls(session) == []
 
 
 class TestKnownPortals:
