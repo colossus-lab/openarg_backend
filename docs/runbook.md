@@ -311,8 +311,17 @@ Cada corrida queda anotada en `public.ddjj_cargas`, con el plan (qué archivo de
 la Oficina Anticorrupción se usó para cada año y qué cortes se descartaron) y
 las filas por año.
 
-1. Frenar la carga: `OPENARG_BEAT_DESACTIVADAS=ingest-ddjj-oa` en el `.env` y
-   recrear `beat`. Si no, el lunes siguiente vuelve a escribir.
+La carga de CABA (`ingest_ddjj_caba`, entrada `ingest-ddjj-caba`) reemplaza
+sólo `cache_ddjj_declaraciones`: copia tal cual las filas de la OA y deja su
+propia previa. Así que la `__previa` de declaraciones es la de la última carga,
+de cualquiera de las dos fuentes, y las de bienes y deudas son siempre de la
+última carga de la OA. Antes de volver atrás, mirar en `ddjj_cargas` cuál
+corrió última.
+
+1. Frenar las cargas: `OPENARG_BEAT_DESACTIVADAS=ingest-ddjj-oa,ingest-ddjj-caba`
+   en el `.env` y recrear `beat`. Si no, el lunes siguiente vuelven a escribir.
+   Si la última carga fue de CABA, alcanza con intercambiar sólo
+   `cache_ddjj_declaraciones`.
 2. Intercambiar las tres juntas, en una transacción. Las tres son de la misma
    carga, y el detalle se une a las declaraciones por `dj_id`.
 

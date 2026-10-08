@@ -400,3 +400,115 @@ def test_al_dia_no_baja_nada(engine, tmp_path, monkeypatch):
 
     assert dt.ingest_ddjj_oa.run() == {"estado": "al_dia"}
     bajar.assert_not_called()
+
+
+# ── CABA ─────────────────────────────────────────────────────────────────────
+
+_CABA_ENCABEZADO = (
+    "id_ddjj,anio_presentacion,nombre,apellido,id_cargo,cargo,total_bienes_muebles,"
+    "total_bienes_inmuebles,total_acciones,total_fondos,total_bonos,total_titulos,"
+    "total_dinero_efectivo,total_dinero_electronico,fecha_presentacion\r\n"
+)
+
+
+def _caba(tmp_path, anios: dict[int, list[str]]) -> list:
+    from app.application.ddjj import caba
+
+    archivos = []
+    for anio, filas in anios.items():
+        ruta = tmp_path / f"caba-{anio}.csv"
+        ruta.write_text(_CABA_ENCABEZADO + "".join(f + "\r\n" for f in filas), encoding="utf-8")
+        archivos.append(
+            caba.ArchivoCaba(
+                ruta=str(ruta),
+                url=f"https://cdn.buenosaires.gob.ar/x/declaraciones-juradas-{anio}.csv",
+                corte=None,
+            )
+        )
+    largo = tmp_path / "caba-2021.csv"
+    largo.write_text("informacion,tipo_de_dato,valor,presentacion,periodo\r\n", encoding="utf-8")
+    archivos.append(
+        caba.ArchivoCaba(
+            ruta=str(largo),
+            url="https://cdn.buenosaires.gob.ar/x/declaraciones-juradas-2021.csv",
+            corte=None,
+        )
+    )
+    return archivos
+
+
+def _filas_caba(anio: int, base: int, n: int) -> list[str]:
+    # n declaraciones de $1.000.000 y una imposible (10.000 veces la mediana).
+    filas = [
+        f"{base + i},{anio},Nombre {i},APELLIDO,1,Director/A General,0,1000000,0,0,0,0,0,0,{anio}-03-01"
+        for i in range(n)
+    ]
+    filas.append(
+        f"{base + n},{anio},Imposible,APELLIDO,1,Controlador/A De Faltas,0,20000000000000,0,0,0,0,0,0,{anio}-03-01"
+    )
+    return filas
+
+
+def test_caba_conserva_la_oa_y_marca_lo_imposible(engine, tmp_path):
+    dt.cargar_oa(engine, dt.armar_plan(_archivos(tmp_path)), permitir_menos_filas=False)
+    otra = tmp_path / "caba"
+    otra.mkdir()
+
+    resumen = dt.cargar_caba(
+        engine,
+        _caba(otra, {2025: _filas_caba(2025, 100, 5), 2026: _filas_caba(2026, 200, 5)}),
+        permitir_menos_filas=False,
+    )
+
+    assert resumen["declaraciones_por_anio"] == {2025: 6, 2026: 6}
+    assert resumen["otras_fuentes_conservadas"] == 6
+    assert resumen["inconsistentes"] == 2
+    assert resumen["salteados"] == [
+        "declaraciones-juradas-2021.csv: formato largo (campo/valor), queda para después"
+    ]
+    with engine.connect() as conn:
+        caba_rows = conn.execute(
+            text(
+                f"SELECT dj_id, bienes, patrimonio, inconsistente, poder FROM "
+                f"raw.\"{dt.TABLA_DECLARACIONES}\" WHERE fuente = 'caba' ORDER BY dj_id"
+            )
+        ).all()
+        oa_rows = conn.execute(
+            text(
+                f'SELECT count(*) FROM raw."{dt.TABLA_DECLARACIONES}" '
+                "WHERE fuente = 'oficina_anticorrupcion'"
+            )
+        ).scalar()
+        bienes_oa = conn.execute(text(f'SELECT count(*) FROM raw."{dt.TABLA_BIENES}"')).scalar()
+        ds = conn.execute(
+            text(
+                "SELECT organization, description FROM datasets "
+                "WHERE source_id = 'ddjj-declaraciones'"
+            )
+        ).one()
+    assert oa_rows == 6 and bienes_oa == 4  # el detalle de la OA no se toca
+    assert all(r.patrimonio is None and r.poder == "ejecutivo" for r in caba_rows)
+    assert [r.dj_id for r in caba_rows if r.inconsistente] == [105, 205]
+    assert ds.organization == "Ciudad de Buenos Aires y Oficina Anticorrupción"
+    assert "Ciudad de Buenos Aires, años 2025–2026 (12 declaraciones)" in ds.description
+    assert "sin deudas" in ds.description
+
+    # Y la OA, cargada otra vez, conserva a CABA.
+    resumen_oa = dt.cargar_oa(
+        engine, dt.armar_plan(_archivos(tmp_path)), permitir_menos_filas=False
+    )
+    assert resumen_oa["otras_fuentes_conservadas"] == 12
+
+
+def test_caba_guardian(engine, tmp_path):
+    dt.cargar_caba(
+        engine,
+        _caba(tmp_path, {2025: _filas_caba(2025, 100, 5), 2026: _filas_caba(2026, 200, 5)}),
+        permitir_menos_filas=False,
+    )
+    otra = tmp_path / "b"
+    otra.mkdir()
+    with pytest.raises(dt._Rechazo, match="desaparecen los años 2025"):
+        dt.cargar_caba(
+            engine, _caba(otra, {2026: _filas_caba(2026, 200, 5)}), permitir_menos_filas=False
+        )
