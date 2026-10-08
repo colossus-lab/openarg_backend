@@ -153,7 +153,7 @@ names) removes entries when the Celery app is created.
 | GET | `/api/v1/catalogo/buscar` | Public data mode: catalogue search |
 | GET | `/api/v1/catalogo/tabla` | Public data mode: describe a table |
 | POST | `/api/v1/catalogo/datos` | Public data mode: read rows |
-| POST | `/api/v1/catalogo/agregar` | Public data mode: aggregates. Missing from `_ALWAYS_PUBLIC` in both auth middlewares, so with `APP_ENV=prod` a request with only the `oarg_sk_` key (the MCP's `agregar_datos`) gets a 401 |
+| POST | `/api/v1/catalogo/agregar` | Public data mode: aggregates |
 | POST/GET/DELETE | `/api/v1/developers/keys`, `/api/v1/developers/usage` | API key CRUD (one active key per user, shown once) and usage |
 | * | `/api/v1/conversations/*`, `/api/v1/users/*` | Chat history, users, privacy, feedback |
 | GET | `/api/v1/datasets/`, `/stats`, `/{id}/download` | List, counts per portal, download (presigned S3 URL or redirect to the portal) |
