@@ -191,7 +191,7 @@ These override TOML settings or are read directly by the code. Names only. The t
 | `DATA_SERVICE_TOKEN` | Bearer token of the internal `/api/v1/data/*` API |
 | `CORS_ALLOWED_ORIGINS` | Comma-separated origins |
 
-Both middlewares let through, without the service key or the Google token, the paths in their `_ALWAYS_PUBLIC` (`/health`, `/health/ready`, `/api/v1/ask`, `/api/v1/fuentes`, `/api/v1/catalogo/buscar`, `/api/v1/catalogo/tabla`, `/api/v1/catalogo/datos`), plus `/docs`, `/openapi.json` and `/redoc` outside prod; `/api/v1/data/*` and `/api/v1/admin/*` have their own auth. `/api/v1/catalogo/agregar` is not in the lists, so with `APP_ENV=prod` a request with only the user's `oarg_sk_` key gets a 401 there (the MCP's `agregar_datos`; see the known issue in the README).
+Both middlewares let through, without the service key or the Google token, the paths in `presentation/http/middleware/public_paths.py`: `/health`, `/health/ready` and the public API (`PUBLIC_API_PATHS`: `/api/v1/ask`, `/api/v1/fuentes`, `/api/v1/catalogo/buscar`, `/api/v1/catalogo/tabla`, `/api/v1/catalogo/datos`, `/api/v1/catalogo/agregar`), plus `/docs`, `/openapi.json` and `/redoc` outside prod; `/api/v1/data/*` and `/api/v1/admin/*` have their own auth.
 
 ### Public API, MCP and web quotas
 

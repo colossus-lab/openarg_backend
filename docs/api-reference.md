@@ -544,18 +544,15 @@ bound parameters (`application/consultas/`, `application/public_catalog.py`).
 | `GET /api/v1/catalogo/buscar?q=…&portal=…&limite=…` | Semantic catalogue search (`limite` 1–25), one entry per file |
 | `GET /api/v1/catalogo/tabla` | Describe a table: columns, types, rows, sample |
 | `POST /api/v1/catalogo/datos` | Read rows with columns, period, filters and order |
-| `POST /api/v1/catalogo/agregar` | Sum, count, average, min/max with grouping and filters (rejected in prod today, see below) |
+| `POST /api/v1/catalogo/agregar` | Sum, count, average, min/max with grouping and filters |
 
 See `catalogo_router.py` for the request and response models.
 
-> **Known issue: `/api/v1/catalogo/agregar` gets a 401 in prod.** The user's key only
-> reaches the router's own check on the paths listed in `_ALWAYS_PUBLIC` of
-> `presentation/http/middleware/auth_middleware.py` and `google_jwt_middleware.py`, and
-> `/api/v1/catalogo/agregar` is not there. With `APP_ENV=prod` the request is rejected
-> before the router: by `APIKeyMiddleware` (`"Invalid or missing API key"`) when
-> `BACKEND_API_KEY` is set, otherwise by `GoogleJwtAuthMiddleware`, which does not take an
-> `oarg_sk_` key as a Google token. The MCP's `agregar_datos` shows it as an invalid or
-> revoked key. The other data-mode endpoints are in the list.
+The user's key only reaches the router's own check on the paths in `PUBLIC_API_PATHS`
+(`presentation/http/middleware/public_paths.py`); any other path is rejected before the
+router on staging and prod, by `APIKeyMiddleware` or `GoogleJwtAuthMiddleware`. A new
+public endpoint goes in that list, and
+`tests/unit/test_api_publica_pasa_los_middlewares.py` fails until it does.
 
 ---
 

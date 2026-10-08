@@ -218,9 +218,7 @@ Two ETLs worth knowing: the series ETL loads into `<table>__nueva` and swaps wit
 
 ## Public API and public MCP
 
-The public endpoints authenticate with the user's key: `Authorization: Bearer oarg_sk_…` (keys are created from the frontend through `/api/v1/developers/keys`). For that to work, a path has to be in `_ALWAYS_PUBLIC` in both auth middlewares (`presentation/http/middleware/auth_middleware.py` and `google_jwt_middleware.py`), so that they let it through to the router's own key check.
-
-> **Known issue: `POST /api/v1/catalogo/agregar` (the MCP's `agregar_datos`) is rejected in prod.** It is the one data-mode path missing from `_ALWAYS_PUBLIC`. With `APP_ENV=prod`, which `docker-compose.prod.yml` sets on staging and prod alike, a request carrying only the user's key gets a 401: from `APIKeyMiddleware` when `BACKEND_API_KEY` is set, because the request has no `X-API-Key`, and otherwise from `GoogleJwtAuthMiddleware`, which is mandatory in prod and does not accept an `oarg_sk_` key as a Google token. The MCP shows that 401 as an invalid or revoked key (`mcp_publico/core.py`). It only works where neither middleware is installed (outside prod, with no `BACKEND_API_KEY` and no `GOOGLE_OAUTH_CLIENT_ID`). The fix is adding the path to both lists.
+The public endpoints authenticate with the user's key: `Authorization: Bearer oarg_sk_…` (keys are created from the frontend through `/api/v1/developers/keys`). For that to work, a path has to be in `PUBLIC_API_PATHS` (`presentation/http/middleware/public_paths.py`), the one list both auth middlewares (`APIKeyMiddleware` and `GoogleJwtAuthMiddleware`) read, so that they let it through to the router's own key check. A path missing from it still works locally, where neither middleware is installed, but gets a 401 on staging and prod. `tests/unit/test_api_publica_pasa_los_middlewares.py` checks that the list is exactly the routes under `controllers/public_api/`.
 
 | Endpoint | Mode | Counts against |
 |----------|------|----------------|
@@ -229,7 +227,7 @@ The public endpoints authenticate with the user's key: `Authorization: Bearer oa
 | `GET /api/v1/catalogo/buscar` | Data | Monthly data requests |
 | `GET /api/v1/catalogo/tabla` | Data | Monthly data requests |
 | `POST /api/v1/catalogo/datos` | Data | Monthly data requests |
-| `POST /api/v1/catalogo/agregar` (rejected in prod today, see the note above) | Data | Monthly data requests |
+| `POST /api/v1/catalogo/agregar` | Data | Monthly data requests |
 
 Quotas (`application/public_quota.py`, `api_key_service.py`), counted per person and reset on the 1st at 00:00 UTC:
 
@@ -249,7 +247,7 @@ The **public MCP** (`mcp_publico/`, `docker/mcp.Dockerfile`) is stateless and ha
 | `buscar_datasets` | `GET /api/v1/catalogo/buscar` |
 | `describir_tabla` | `GET /api/v1/catalogo/tabla` |
 | `obtener_datos` | `POST /api/v1/catalogo/datos` |
-| `agregar_datos` | `POST /api/v1/catalogo/agregar` (gets a 401 in prod today, see the known issue above) |
+| `agregar_datos` | `POST /api/v1/catalogo/agregar` |
 
 It also serves the site at `/` and `/health`. Its timeout to the backend (`MCP_BACKEND_TIMEOUT_SECONDS`, 75 s) must stay above `PUBLIC_API_TIMEOUT_SECONDS` + 10 s. See [`mcp_publico/README.md`](mcp_publico/README.md) and [`specs/029-mcp-publico/`](specs/029-mcp-publico/spec.md). The operations MCP in [`scripts/ops_mcp/`](scripts/ops_mcp/README.md) is a different, internal tool.
 
@@ -265,7 +263,7 @@ It also serves the site at `/` and `/health`. Its timeout to the backend (`MCP_B
 | Chat | POST | `/api/v1/query/smart` | Service |
 | Chat | WS | `/api/v1/query/ws/smart` | `X-API-Key` in the handshake (the `?api_key=` query param still works but is deprecated); optional `id_token` in the first message |
 | Public API | POST | `/api/v1/ask` | `Bearer oarg_sk_…` |
-| Public API (data mode) | GET/POST | `/api/v1/fuentes`, `/api/v1/catalogo/{buscar,tabla,datos,agregar}` | `Bearer oarg_sk_…`; `agregar` is missing from the middlewares' public paths, so in prod it also asks for the service key and the Google token (see [the known issue](#public-api-and-public-mcp)) |
+| Public API (data mode) | GET/POST | `/api/v1/fuentes`, `/api/v1/catalogo/{buscar,tabla,datos,agregar}` | `Bearer oarg_sk_…` |
 | Developers | POST/GET/DELETE | `/api/v1/developers/keys`, `/api/v1/developers/usage` | Service |
 | Conversations | GET/POST/PATCH/DELETE | `/api/v1/conversations/*` (incl. message feedback) | Service |
 | Users | POST/GET/PATCH/DELETE | `/api/v1/users/sync`, `/api/v1/users/me*` | Service |
