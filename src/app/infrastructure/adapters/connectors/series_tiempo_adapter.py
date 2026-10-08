@@ -19,6 +19,21 @@ logger = logging.getLogger(__name__)
 
 BASE_URL = "https://apis.datos.gob.ar/series/api"
 
+
+def source_url(series_ids: list[str]) -> str:
+    """El link de «Fuentes»: los datos en la API oficial, en CSV y en orden.
+
+    Antes iba a ``datos.gob.ar/series/api/series/?ids=…``, que redirige a la
+    página de la serie en datos.gob.ar. Esa página arma el gráfico llamando a la
+    API desde el navegador y se cae seguido («No se pudo conectar con la API de
+    series», Bad gateway en prod el 08-oct), aunque la API responda. El CSV sale
+    de la misma API que dio las cifras. ``last=5000`` trae la serie entera hasta
+    5000 filas y, si es más larga, las últimas 5000 en orden cronológico: nunca
+    se pierde el dato más nuevo.
+    """
+    return f"{BASE_URL}/series/?ids={','.join(series_ids)}&format=csv&last=5000"
+
+
 _IPC_NACIONAL = "148.3_INIVELNAL_DICI_M_26"
 
 
@@ -1367,7 +1382,7 @@ class SeriesTiempoAdapter(ISeriesTiempoConnector):
             return DataResult(
                 source="series_tiempo",
                 portal_name="API de Series de Tiempo",
-                portal_url=f"https://datos.gob.ar/series/api/series/?ids={','.join(series_ids)}",
+                portal_url=source_url(series_ids),
                 dataset_title=dataset_title,
                 format="time_series",
                 records=records,

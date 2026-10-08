@@ -144,6 +144,31 @@ async def test_una_serie_corta_es_un_solo_pedido_y_no_esta_truncada() -> None:
     assert result.metadata["truncada"] is False
 
 
+async def test_el_link_de_la_fuente_es_el_csv_de_la_api_y_no_la_pagina_de_datos_gob_ar() -> None:
+    """El 08-oct, en prod, el link de «Fuentes» daba Bad gateway: iba a
+    datos.gob.ar/series, que arma el gráfico llamando a la API desde el
+    navegador y se cae aunque la API responda. Ahora es el CSV de la API."""
+    api = FakeSeriesApi(ipc_real())
+    result = await api.adapter().fetch([IPC_ID])
+
+    assert result is not None
+    assert result.portal_url == (
+        f"https://apis.datos.gob.ar/series/api/series/?ids={IPC_ID}&format=csv&last=5000"
+    )
+    assert not result.portal_url.startswith("https://datos.gob.ar/")
+
+
+def test_el_link_lleva_todas_las_series_con_su_representacion() -> None:
+    from app.infrastructure.adapters.connectors.series_tiempo_adapter import source_url
+
+    url = source_url(["155.1_TLTAL_C_0_0_5:percent_change_a_year_ago", "155.1_TLTAL_C_0_0_5"])
+    assert url == (
+        "https://apis.datos.gob.ar/series/api/series/"
+        "?ids=155.1_TLTAL_C_0_0_5:percent_change_a_year_ago,155.1_TLTAL_C_0_0_5"
+        "&format=csv&last=5000"
+    )
+
+
 async def test_limite_chico_devuelve_las_ultimas() -> None:
     api = FakeSeriesApi(diaria(2345))
     result = await api.adapter().fetch([TIPO_CAMBIO_ID], limit=10)
