@@ -153,19 +153,35 @@ async def test_el_link_de_la_fuente_es_el_csv_de_la_api_y_no_la_pagina_de_datos_
 
     assert result is not None
     assert result.portal_url == (
-        f"https://apis.datos.gob.ar/series/api/series/?ids={IPC_ID}&format=csv&last=5000"
+        f"https://apis.datos.gob.ar/series/api/series/?ids={IPC_ID}&format=csv&last=5000&sep=%3B&decimal=%2C"
     )
     assert not result.portal_url.startswith("https://datos.gob.ar/")
 
 
-def test_el_link_lleva_todas_las_series_con_su_representacion() -> None:
+async def test_con_una_representacion_el_link_sigue_llegando_al_ultimo_dato() -> None:
+    """La variación se pide aparte (``representation_mode``): el link lleva el id
+    sin sufijo y sin representación, porque ``last`` con una representación hace
+    que la API descarte los períodos más recientes (la interanual del IPC con
+    ``last=5000`` terminaba en 2025-08 cuando el dato citado es 2026-08)."""
+    api = FakeSeriesApi(ipc_real())
+    result = await api.adapter().fetch([IPC_ID], representation="percent_change_a_year_ago")
+
+    assert result is not None
+    assert result.portal_url.startswith(
+        f"https://apis.datos.gob.ar/series/api/series/?ids={IPC_ID}&"
+    )
+    assert ":" not in result.portal_url.split("ids=", 1)[1].split("&", 1)[0]
+    assert "representation_mode" not in result.portal_url
+
+
+def test_un_id_con_sufijo_de_representacion_va_sin_el_sufijo() -> None:
     from app.infrastructure.adapters.connectors.series_tiempo_adapter import source_url
 
-    url = source_url(["155.1_TLTAL_C_0_0_5:percent_change_a_year_ago", "155.1_TLTAL_C_0_0_5"])
+    url = source_url(["155.1_TLTAL_C_0_0_5:percent_change_a_year_ago", "155.1_ISTRIARIA_C_0_0_9"])
     assert url == (
         "https://apis.datos.gob.ar/series/api/series/"
-        "?ids=155.1_TLTAL_C_0_0_5:percent_change_a_year_ago,155.1_TLTAL_C_0_0_5"
-        "&format=csv&last=5000"
+        "?ids=155.1_TLTAL_C_0_0_5,155.1_ISTRIARIA_C_0_0_9"
+        "&format=csv&last=5000&sep=%3B&decimal=%2C"
     )
 
 

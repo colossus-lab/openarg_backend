@@ -24,14 +24,21 @@ def source_url(series_ids: list[str]) -> str:
     """El link de «Fuentes»: los datos en la API oficial, en CSV y en orden.
 
     Antes iba a ``datos.gob.ar/series/api/series/?ids=…``, que redirige a la
-    página de la serie en datos.gob.ar. Esa página arma el gráfico llamando a la
-    API desde el navegador y se cae seguido («No se pudo conectar con la API de
-    series», Bad gateway en prod el 08-oct), aunque la API responda. El CSV sale
-    de la misma API que dio las cifras. ``last=5000`` trae la serie entera hasta
-    5000 filas y, si es más larga, las últimas 5000 en orden cronológico: nunca
-    se pierde el dato más nuevo.
+    página de la serie en datos.gob.ar. Esa página se cae seguido (Bad gateway en
+    prod el 07-oct a la noche) aunque la API responda. El CSV sale de la misma
+    API que dio las cifras, con ``;`` y coma decimal para que lo abra bien un
+    Excel en castellano.
+
+    Son los valores de la serie, sin representación: ``fetch`` pide la
+    variación aparte (``representation_mode``) y los ids llegan sin sufijo.
+    ``last=5000`` trae la serie entera hasta 5000 filas y, si es más larga, las
+    últimas 5000 en orden cronológico. **No sirve con una representación**
+    (``id:percent_change…`` o ``representation_mode``): combinada con ``last``
+    la API descarta los períodos más recientes, igual que con ``sort=desc``
+    (ver ``fetch``). Por eso los ids que tengan sufijo se mandan sin él.
     """
-    return f"{BASE_URL}/series/?ids={','.join(series_ids)}&format=csv&last=5000"
+    ids = ",".join(sid.split(":", 1)[0] for sid in series_ids)
+    return f"{BASE_URL}/series/?ids={ids}&format=csv&last=5000&sep=%3B&decimal=%2C"
 
 
 _IPC_NACIONAL = "148.3_INIVELNAL_DICI_M_26"

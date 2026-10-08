@@ -43,40 +43,119 @@ class PgVectorSearchAdapter(IVectorSearch):
     # (2026-10-05).
     _ANN_EF_SEARCH = 300
     # Chunks fetched through the index before grouping by dataset (about 3
-    # per dataset, and the MCP asks for up to 100 datasets). With the
-    # iterative scan the walk goes on past ef_search until it has this many,
-    # up to hnsw.max_scan_tuples (20,000 by default); without it (pgvector
-    # before 0.8) one scan stops at ef_search.
+    # per dataset; the agent asks for 32 datasets, the MCP for 40 and up to
+    # 100). With the iterative scan the walk goes on past ef_search until it
+    # has this many, up to hnsw.max_scan_tuples (20,000 by default); without
+    # it (pgvector before 0.8) one scan stops at ef_search.
     #
-    # This is the recall/latency knob, and 1000 is a trade, not a free lunch.
-    # Staging, 2026-10-07, 36 real queries, recall against the exact search
-    # counting ties, as served (fall back included, it ran 0 times), and the
-    # walk alone with 8 searches at once (warm cache):
+    # This is the recall/latency knob. Staging, 2026-10-07, 36 real queries,
+    # recall against the exact search counting ties, as served (fall back
+    # included, it ran 0 times), and the walk alone with 8 searches at once
+    # (warm cache):
     #
     #   candidates        recall@32  recall@40  p95 with 8
-    #   400 (main, prod)  0.904      0.909      63 ms
-    #   1000              0.942      0.943      101-184 ms
+    #   400 (old main)    0.904      0.909      63 ms
+    #   1000 (#176)       0.942      0.943      101-184 ms
     #   2000              0.949      0.950      237-263 ms
     #   4000              0.973      0.977      558 ms
     #   8000              1.000      0.999      938 ms
     #   exact (#131)      1.0        1.0        2.2 s median (2026-10-05)
     #
-    # What 1000 misses is in the graph but far along the walk: groups of
+    # What the walk misses is in the graph but far along it: groups of
     # datasets with (almost) the same vector (30 Córdoba "Listado de agentes
     # del Poder Ejecutivo" at 0.663, 28 "Elecciones legislativas Entre Ríos
     # 2013" at 0.627) and re-embedded chunks, reached after 4000-8000
-    # tuples. Three of the 36 queries lose half or more of their top 32, and
-    # their best score (0.607-0.643) is above _ANN_WEAK_TOP_SCORE, so
-    # ``search_datasets_ann`` serves them as they are. 1000 keeps the most
-    # room under 8 at once (prod has a third more chunks than staging); a
-    # wider walk buys recall with latency, a REINDEX is not measured to help.
-    _ANN_CANDIDATES = 1000
-    # A best score under this is not trusted and the exact search runs
-    # instead. With Cohere v3 an unrelated dataset scores 0.50-0.57 and a
-    # genuine match 0.60-0.77; the trapped walks above topped at 0.48-0.52.
-    # Weak queries ("dólar oficial" 0.557) stay just above it, so the exact
-    # search is the exception and not the rule.
+    # tuples. Their best score (0.607-0.643) is above _ANN_WEAK_TOP_SCORE,
+    # so ``search_datasets_ann`` serves them as they are.
+    #
+    # #176 took 1000 to prod, and prod paid for that recall without getting
+    # anything the gold set sees. 2026-10-08, read-only, gold set (62
+    # queries, two searches each), with the usual embedding load; latency is
+    # the MCP's path per query (embedding, search, tables):
+    #
+    #   candidates                  p50          p95        hit@3 mcp / agent
+    #   200, ef 200, no fall back   0.81 s       1.18 s     (old main)
+    #   1000                        0.73-1.48 s  2.7-3.5 s  0.942 / 0.962
+    #   500                         0.63-0.69 s  1.75 s     0.942 / 0.962
+    #   300                         0.50-0.55 s  1.6-1.9 s  0.942 / 0.962
+    #
+    # The recall between 300 and 1000 is the tail of the top 32-40, not the
+    # top 3 callers rank by. Staging, 2026-10-08, the walk alone over the
+    # gold set's 62 queries and the canary's 20 (warm): 400 and 1000 gave the
+    # same top 3 in 81 of 82 and the same top 10 in 79, recall@32 of 400
+    # against 1000 0.985; 16-19 ms median against 24-36; and neither came
+    # back with fewer datasets than asked for, up to 100.
+    #
+    # 400 is what old main walked for the agent and stays above
+    # _ANN_EF_SEARCH, so the iterative scan still brings candidates past the
+    # frontier. With a portal the walk keeps going until it has 400 of that
+    # portal's chunks or runs out of tuples; a portal with fewer falls back
+    # to the exact search, which the portal keeps small.
+    #
+    # Where 400 does lose the top, the walk ends trapped with a weak best
+    # score, and 1000 gets out (``_ANN_WIDE_CANDIDATES``).
+    _ANN_CANDIDATES = 400
+    # Chunks the second walk fetches when the first one's best score is weak
+    # (``search_datasets_index``): #176's value, what prod walked until #183.
+    #
+    # Review of #183, staging (76k chunks), 2026-10-08, read-only: the 20
+    # canary queries and the gold set's, 81 distinct, five embeddings each
+    # (Bedrock does not return the same vector twice for the same text: 72
+    # of 81 got different ones, up to 0.0025 apart). Walks whose top stays
+    # under the weak score while the exact search's is over it:
+    #
+    #   candidates  trapped                              canary recall@10
+    #   400, 500    "votaciones nominales" 4/5 (0.526    0.905 once, 0.855 4x
+    #               vs 0.675: "Legislativas provinciales
+    #               2017" for "Votaciones Nominales"),
+    #               "dólar oficial" 5/5 (0.549 vs 0.557)
+    #   600         none                                 0.915 once, 0.875 4x
+    #   700-1000    none                                 0.915 5x
+    #
+    # (plus "resultados de la quiniela de hoy" at every width, a query with
+    # no data: 0.491 against 0.557). The exact search behind the walk
+    # rescued them, but it runs under ``_EXACT_FALLBACK_TIMEOUT_MS``: cold
+    # (13 s on prod) or under load it is cut, and with the ceiling forced to
+    # 100 ms "votaciones nominales" was served the trapped walk. A second
+    # walk is a rescue that does not depend on the ceiling: it reads the
+    # index, not the table, and only for the weak few (33 of 405 searches).
+    # The width that frees those queries on staging (600-700) is not
+    # measured on prod's ~110k chunks; 1000 is what prod has been serving.
+    #
+    # With it, the same 405 searches: 372 served by the first walk, 8 freed
+    # by the second, 25 still weak and on to the exact search. With the
+    # ceiling forced to 1 ms (always cut) the gold set's hit@3 and negatives
+    # were the same as with 1500 (mcp 0.885, agent 0.981, both new cases
+    # 5/5), and the only trapped answer served was the quiniela's.
+    _ANN_WIDE_CANDIDATES = 1000
+    # A best score under this is not trusted: the wider walk runs, and if it
+    # is still weak, the exact search. With Cohere v3 an unrelated dataset
+    # scores 0.50-0.57 and a genuine match 0.60-0.77; the trapped walks above
+    # topped at 0.48-0.52. Weak queries ("dólar oficial" 0.557) stay just
+    # above it, so the exact search is the exception and not the rule.
     _ANN_WEAK_TOP_SCORE = 0.55
+    # Ceiling (ms) on the exact search when it runs behind the index; past
+    # it the index's hits are served (``_exact_within_cap``).
+    #
+    # Prod, 2026-10-08, gold set: 8 of 124 searches fell back for a weak top
+    # (0.489-0.540). The exact search took 0.8-1 s warm and 13 s cold (the
+    # first one, the run's ~14 s maximum), and it raised the top in 1 of 4
+    # queries (0.491 to 0.557, a query OpenArg has no data for). 1500 lets
+    # the warm scan through with room and stops the cold one; with 8
+    # searches at once on staging the scan took 2.2 s median (2026-10-05),
+    # so under load the index answers too. What reaches the exact search
+    # already went through the wide walk (``_ANN_WIDE_CANDIDATES``), so what
+    # the ceiling cuts is the exact search of a query still weak at 1000
+    # candidates: the case measured just above, on prod, where it raised the
+    # top for one query with no data. The search a caller sees costs the
+    # walks plus at most this, not plus a cold read of the table.
+    #
+    # Staging, 2026-10-08: the scan of every chunk took 0.43-0.65 s warm and
+    # up to 2.7 s cold; in the first run with the ceiling it fired twice, on
+    # a query whose exact top was the walk's own (0.538). Filtered by a
+    # small portal it reads that portal's chunks: 14-69 ms (mendoza,
+    # neuquen_legislatura, caba), 0.22 s for datos_gob_ar.
+    _EXACT_FALLBACK_TIMEOUT_MS = 1500
 
     # pgvector version, read once per process: iterative index scans exist
     # from 0.8.0 on.
@@ -140,23 +219,35 @@ class PgVectorSearchAdapter(IVectorSearch):
 
         What every caller uses (``/catalogo/buscar`` for the MCP, the agent's
         ``buscar_datos``, ``/data/search``). The index answers first
-        (``search_datasets_hnsw``, a walk of the graph and never a scan of
-        the table); its answer is distrusted, and the exact search
-        (``search_datasets_exact``, the only one that reads every chunk) runs
-        instead, when it brings fewer datasets than asked for or its best
-        score is weak. A trapped walk does not come back empty: it comes back
-        full of the wrong neighbours with low scores, which is the signal
-        checked here.
+        (``search_datasets_index``: a walk of the graph, and a wider one when
+        the first one's best score is weak; never a scan of the table); its
+        answer is distrusted, and the exact search (``search_datasets_exact``,
+        the only one that reads every chunk) runs instead, when it brings
+        fewer datasets than asked for or its best score is still weak. A
+        trapped walk does not come back empty: it comes back full of the
+        wrong neighbours with low scores, which is the signal checked here.
 
         What the check does not see: neighbours the walk never reaches while
         it brings good ones. Those answers are served, so what callers get is
-        not the exact search's answer (recall@40 0.943 against it on staging,
-        2026-10-07; see ``_ANN_CANDIDATES``).
+        not the exact search's answer (recall@40 0.909 against it on staging
+        with 400 candidates, 2026-10-07; see ``_ANN_CANDIDATES``).
+
+        The exact search behind the index runs under a ceiling
+        (``_EXACT_FALLBACK_TIMEOUT_MS``) for both reasons, and past it the
+        index's hits are served as they are (the wider walk's, if it ran).
+        What it costs depends on what it reads, not on why it runs: for a
+        weak top, and for too few hits without a portal or with a big one, it
+        reads every chunk (13 s cold on prod); for too few hits in a small
+        portal it reads that portal's chunks and finishes far under the
+        ceiling, which then never bites. A walk that the narrow width traps
+        and the wide one frees (see ``_ANN_WIDE_CANDIDATES``) never reaches
+        the ceiling: the wide walk answers it.
 
         Before pgvector 0.8 there is no iterative scan, and an index scan
         filtered by portal can come back empty for a small portal; with a
         portal filter the exact search, which the filter keeps small, runs
-        directly.
+        directly, without the ceiling: there it is the answer and not a
+        second opinion.
         """
         if portal_filter and not await self._supports_iterative_scan():
             return await self.search_datasets_exact(
@@ -164,7 +255,7 @@ class PgVectorSearchAdapter(IVectorSearch):
             )
 
         t0 = time.perf_counter()
-        hits = await self.search_datasets_hnsw(
+        hits = await self.search_datasets_index(
             query_embedding, limit, portal_filter, min_similarity
         )
         hnsw_ms = (time.perf_counter() - t0) * 1000
@@ -179,9 +270,22 @@ class PgVectorSearchAdapter(IVectorSearch):
             return hits
 
         t1 = time.perf_counter()
-        exact = await self.search_datasets_exact(
+        exact, failure = await self._exact_within_cap(
             query_embedding, limit, portal_filter, min_similarity
         )
+        exact_ms = (time.perf_counter() - t1) * 1000
+        if exact is None:
+            logger.warning(
+                "search_datasets_ann: hnsw→exacta (%s) cortada: %s; se sirven los hits del"
+                " índice hits=%d top=%.3f hnsw_ms=%.0f exact_ms=%.0f",
+                reason,
+                failure,
+                len(hits),
+                hits[0].score if hits else 0.0,
+                hnsw_ms,
+                exact_ms,
+            )
+            return hits
         logger.info(
             "search_datasets_ann: hnsw→exacta (%s) hits=%d→%d top=%.3f→%.3f hnsw_ms=%.0f exact_ms=%.0f",
             reason,
@@ -190,9 +294,71 @@ class PgVectorSearchAdapter(IVectorSearch):
             hits[0].score if hits else 0.0,
             exact[0].score if exact else 0.0,
             hnsw_ms,
-            (time.perf_counter() - t1) * 1000,
+            exact_ms,
         )
         return exact
+
+    async def _exact_within_cap(
+        self,
+        query_embedding: list[float],
+        limit: int,
+        portal_filter: str | None,
+        min_similarity: float,
+    ) -> tuple[list[SearchResult], None] | tuple[None, str]:
+        """``search_datasets_exact`` under ``_EXACT_FALLBACK_TIMEOUT_MS``.
+
+        Returns ``(results, None)``, or ``(None, why)`` when the exact search
+        hit the ceiling or failed; then the transaction is as it was before
+        the call and still usable. The agent shares one transaction across a
+        whole turn: a timed-out statement would leave it aborted, and every
+        later query of the turn would fail until a rollback that also undoes
+        the walk's settings. So the search runs in a savepoint, with
+        ``statement_timeout`` set locally inside it:
+
+        - past the ceiling (or any other error) the savepoint is rolled back,
+          and with it the timeout and the error state;
+        - otherwise the timeout goes back to what it was before the savepoint
+          is released (a released savepoint keeps its ``SET LOCAL`` until the
+          transaction ends, and the rest of the turn must not inherit 1.5 s).
+
+        If the rollback itself fails, the connection is gone and that error
+        propagates: the caller's ``reset`` handles it, as for any failed
+        search. A cancellation (``CancelledError``, the agent's tool timeout)
+        is not caught either.
+        """
+        savepoint = await self._session.begin_nested()
+        try:
+            before = (
+                await self._session.execute(text("SELECT current_setting('statement_timeout')"))
+            ).scalar()
+            await self._session.execute(
+                text("SELECT set_config('statement_timeout', :ms, true)"),
+                {"ms": str(self._EXACT_FALLBACK_TIMEOUT_MS)},
+            )
+            exact = await self.search_datasets_exact(
+                query_embedding, limit, portal_filter, min_similarity
+            )
+            await self._session.execute(
+                text("SELECT set_config('statement_timeout', :before, true)"),
+                {"before": str(before)},
+            )
+        except Exception as exc:  # noqa: BLE001 — any failure serves the index's hits
+            failure = self._describe_failure(exc)
+        else:
+            await savepoint.commit()
+            return exact, None
+        # Outside the except: a failed rollback must propagate, not be logged
+        # as a timeout over a transaction nobody can use any more.
+        await savepoint.rollback()
+        return None, failure
+
+    @classmethod
+    def _describe_failure(cls, exc: Exception) -> str:
+        """``statement_timeout`` (SQLSTATE 57014) by name, anything else by type."""
+        if getattr(getattr(exc, "orig", None), "sqlstate", None) == "57014":
+            return f"pasó el tope de {cls._EXACT_FALLBACK_TIMEOUT_MS} ms"
+        first_line = (str(exc).splitlines() or [""])[0]
+        return f"{type(exc).__name__}: {first_line[:200]}"
 
     @classmethod
     def _distrust_reason(cls, hits: list[SearchResult], limit: int) -> str | None:
@@ -203,12 +369,75 @@ class PgVectorSearchAdapter(IVectorSearch):
             return "puntaje bajo"
         return None
 
+    async def search_datasets_index(
+        self,
+        query_embedding: list[float],
+        limit: int = 10,
+        portal_filter: str | None = None,
+        min_similarity: float = 0.40,
+    ) -> list[SearchResult]:
+        """What the index serves: the walk, and a wider one when its top is weak.
+
+        The first walk fetches ``_ANN_CANDIDATES`` chunks. When it brings
+        enough datasets but its best score is under ``_ANN_WEAK_TOP_SCORE``,
+        the walk may be trapped (see ``_ANN_WIDE_CANDIDATES``), and a second
+        one fetches ``_ANN_WIDE_CANDIDATES``; its answer is served whatever
+        it is. On the same graph it starts where the first one did and goes
+        further, so it brings those candidates and more: rank by rank its
+        scores are never lower (staging, 33 weak walks, 2026-10-08).
+
+        Only then, and not:
+
+        - for too few datasets: with a portal the first walk already went on
+          until it had the portal's chunks or ran out of tuples, and a second
+          one would repeat it; without one it has not happened up to limit
+          100 (staging, 2026-10-08). The exact search answers that;
+        - with a portal: a small portal's exact search reads only its chunks
+          (14-69 ms on staging) and is the better second opinion;
+        - without the iterative scan (pgvector before 0.8): both walks stop
+          at ef_search, and the second would be the first again.
+
+        Public so the recall canary measures what callers get from the index
+        before the exact search (``search_canary``).
+        """
+        hits = await self.search_datasets_hnsw(
+            query_embedding, limit, portal_filter, min_similarity
+        )
+        if (
+            portal_filter
+            or self._distrust_reason(hits, limit) != "puntaje bajo"
+            or not await self._supports_iterative_scan()
+        ):
+            return hits
+        t0 = time.perf_counter()
+        wide = await self.search_datasets_hnsw(
+            query_embedding,
+            limit,
+            portal_filter,
+            min_similarity,
+            candidates=self._ANN_WIDE_CANDIDATES,
+        )
+        logger.info(
+            "search_datasets_index: hnsw→hnsw ancho (puntaje bajo) candidatos=%d→%d"
+            " hits=%d→%d top=%.3f→%.3f ancho_ms=%.0f",
+            self._ANN_CANDIDATES,
+            self._ANN_WIDE_CANDIDATES,
+            len(hits),
+            len(wide),
+            hits[0].score,
+            wide[0].score if wide else 0.0,
+            (time.perf_counter() - t0) * 1000,
+        )
+        return wide
+
     async def search_datasets_hnsw(
         self,
         query_embedding: list[float],
         limit: int = 10,
         portal_filter: str | None = None,
         min_similarity: float = 0.40,
+        *,
+        candidates: int | None = None,
     ) -> list[SearchResult]:
         """Approximate nearest neighbours through the HNSW index, unchecked.
 
@@ -224,7 +453,7 @@ class PgVectorSearchAdapter(IVectorSearch):
           an iterative scan, the ceiling on the rows one index scan returns
           (40 by default). See ``_ANN_EF_SEARCH``.
         - ``hnsw.iterative_scan`` keeps scanning when the first pass falls
-          short. It is what brings the candidates past ef_search (1000
+          short. It is what brings the candidates past ef_search (400
           chunks against a frontier of 300), and with a portal filter what
           finds the portal's chunks behind closer ones of other portals
           (filtering after the fetch returned nothing for caba and
@@ -232,9 +461,9 @@ class PgVectorSearchAdapter(IVectorSearch):
 
         Both are set with ``is_local`` and end with the transaction. The walk
         itself runs through ``_walk_index``, which keeps the planner off a
-        seq scan. Public so the recall canary can compare the index alone
-        against the exact search; callers that serve results use
-        ``search_datasets_ann``.
+        seq scan. ``candidates`` is ``_ANN_CANDIDATES`` unless given (the
+        wider walk of ``search_datasets_index``). Callers that serve results
+        use ``search_datasets_ann``.
         """
         await self._session.execute(
             text("SELECT set_config('hnsw.ef_search', :ef, true)"),
@@ -246,7 +475,7 @@ class PgVectorSearchAdapter(IVectorSearch):
             )
         params: dict = {
             "embedding": self._literal(query_embedding),
-            "candidates": self._ANN_CANDIDATES,
+            "candidates": candidates or self._ANN_CANDIDATES,
             "min_sim": min_similarity,
             "limit": limit,
         }

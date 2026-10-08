@@ -11,6 +11,8 @@ import json
 import re
 from pathlib import Path
 
+import pytest
+
 from tests.evaluation import run_search_gold as gold
 
 GOLD = json.loads(
@@ -37,6 +39,69 @@ def test_un_dataset_sin_tablas_no_cuenta_como_acierto() -> None:
     spec = {"titulo": r"pauta publicitaria", "portal": ["caba"]}
     assert not gold.matches(spec, {"titulo": "Pauta Publicitaria", "portal": "caba", "tablas": []})
     assert gold.matches(spec, {"titulo": "Pauta Publicitaria", "portal": "caba", "tablas": ["t"]})
+
+
+def test_un_esperado_que_cuenta_sin_filas_cuenta_por_titulo() -> None:
+    """busq_053 mide que el recorrido no quede atrapado; en staging las tablas
+    de "Votaciones Nominales" tienen 0 filas (revisión del #183)."""
+    spec = {"titulo": r"^votaciones nominales$", "cuenta_sin_filas": True}
+    assert gold.matches(spec, {"titulo": "Votaciones Nominales", "portal": "x", "tablas": []})
+    assert not gold.matches(spec, {"titulo": "Votaciones", "portal": "x", "tablas": ["t"]})
+
+
+def test_los_casos_de_la_revision_del_183_estan_en_el_gold_set() -> None:
+    """Las dos consultas que el recorrido de 400 candidatos atrapaba en
+    staging (08-oct), con lo que la exacta pone arriba."""
+    casos = {c["q"]: c for c in GOLD["casos"]}
+    votaciones = casos["votaciones nominales"]["esperado"][0]
+    assert gold.matches(votaciones, {"titulo": "Votaciones Nominales", "tablas": []})
+    assert not gold.matches(votaciones, {"titulo": "Legislativas provinciales 2017", "tablas": []})
+    dolar = casos["dólar oficial"]["esperado"][0]
+    assert gold.matches(dolar, {"titulo": "Cotizaciones Cambiarias BCRA", "tablas": ["t"]})
+    assert not gold.matches(
+        dolar, {"titulo": "Brasil Tipo de cambio nominal y real", "tablas": ["t"]}
+    )
+
+
+def test_las_repeticiones_corren_cada_caso_seguido() -> None:
+    casos = [{"id": "a"}, {"id": "b"}]
+    assert [c["id"] for c in gold.expand_cases(casos, 3)] == ["a", "a", "a", "b", "b", "b"]
+    assert gold.expand_cases(casos, 0) == casos
+
+
+def test_con_repeticiones_el_resumen_nombra_una_vez_cada_caso_que_falla() -> None:
+    row = {"id": "p1", "negativo": False, "ms": 1, "top_score": 0.5}
+    rows = [
+        {**row, "mcp": {"ok": False, "rank": None}, "agente": {"ok": True, "rank": 0}},
+        {**row, "mcp": {"ok": False, "rank": 4}, "agente": {"ok": False, "rank": None}},
+        {**row, "mcp": {"ok": True, "rank": 0}, "agente": {"ok": True, "rank": 0}},
+    ]
+    s = gold.summarize(rows)
+    assert s["mcp"]["fallan"] == ["p1"] and s["agente"]["fallan"] == ["p1"]
+    assert s["mcp"]["hit@3"] == round(1 / 3, 3) and s["agente"]["hit@3"] == round(2 / 3, 3)
+
+
+def test_el_tope_de_la_exacta_se_fuerza_sobre_el_adaptador_de_verdad() -> None:
+    from app.infrastructure.adapters.search.pgvector_search_adapter import (
+        PgVectorSearchAdapter,
+    )
+
+    class _Adapter:
+        _EXACT_FALLBACK_TIMEOUT_MS = 1500
+
+    gold.force_exact_cap(_Adapter, None)
+    assert _Adapter._EXACT_FALLBACK_TIMEOUT_MS == 1500
+    gold.force_exact_cap(_Adapter, 1)
+    assert _Adapter._EXACT_FALLBACK_TIMEOUT_MS == 1
+    # El nombre que el runner fuerza es el que el adaptador usa; si cambia,
+    # el runner falla en vez de medir sin tope.
+    assert hasattr(PgVectorSearchAdapter, "_EXACT_FALLBACK_TIMEOUT_MS")
+
+    class _Renamed:
+        pass
+
+    with pytest.raises(SystemExit):
+        gold.force_exact_cap(_Renamed, 1)
 
 
 def test_el_portal_esperado_se_respeta() -> None:

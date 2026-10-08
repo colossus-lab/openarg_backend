@@ -74,7 +74,9 @@ async def _measure(queries: tuple[str, ...]) -> Any:
     try:
         for q in queries:
             vector = await embedder.embed(q)
-            hnsw, hnsw_s = await _read_only(lambda a, v=vector: a.search_datasets_hnsw(v, K))
+            # What the index serves before the exact search: the walk, and
+            # the wider one when its top is weak (review of #183).
+            hnsw, hnsw_s = await _read_only(lambda a, v=vector: a.search_datasets_index(v, K))
             exact, exact_s = await _read_only(lambda a, v=vector: a.search_datasets_exact(v, K))
             results.append(
                 QueryRecall(

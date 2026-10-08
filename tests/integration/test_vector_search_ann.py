@@ -29,6 +29,7 @@ import uuid
 
 import pytest
 from sqlalchemy import create_engine, text
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.infrastructure.adapters.search.pgvector_search_adapter import PgVectorSearchAdapter
@@ -189,6 +190,9 @@ class _ExplainTheWalk:
             self.plans.append(await _explain(self._session, sql, params))
         return await self._session.execute(statement, params)
 
+    def begin_nested(self):
+        return self._session.begin_nested()
+
 
 async def _explain(session: AsyncSession, sql: str, params: dict | None) -> str:
     rows = await session.execute(text("EXPLAIN " + sql), params)
@@ -202,6 +206,19 @@ async def _seqscan(session: AsyncSession) -> str:
 def _query(dims: int) -> list[float]:
     q = [0.0] * dims
     q[0] = 1.0
+    return q
+
+
+def _weak_query(dims: int) -> list[float]:
+    """The query tilted off the catalogue's subspace (axis 5 is unused).
+
+    Every chunk's cosine is the axis-0 one times 0.54: the big portal's land
+    at ~0.44-0.50, over the 0.40 threshold and under _ANN_WEAK_TOP_SCORE, and
+    the small portal's under the threshold. A full answer with a weak top.
+    """
+    q = [0.0] * dims
+    q[0] = 0.54
+    q[5] = math.sqrt(1 - 0.54**2)
     return q
 
 
@@ -286,7 +303,7 @@ async def test_the_walk_leaves_seqscan_as_it_found_it(catalog, session, natural_
 async def test_candidates_past_ef_search_come_from_the_iterative_scan(
     catalog, natural_session
 ) -> None:
-    """ef_search is 300 and the walk asks for 1000 chunks: past the frontier
+    """ef_search is 300 and the walk asks for 400 chunks: past the frontier
     the iterative scan keeps walking. Without it one scan stops at 300 chunks,
     all of the big portal, and the small portal's 3 datasets never show up."""
     version = (
@@ -358,3 +375,118 @@ async def test_threshold_drops_unrelated_datasets(catalog, session) -> None:
     found = {r.dataset_id for r in results}
     assert not found & set(catalog["other_ids"])
     assert all(r.score >= 0.40 for r in results)
+
+
+async def _statement_timeout(session: AsyncSession) -> str:
+    return (await session.execute(text("SELECT current_setting('statement_timeout')"))).scalar()
+
+
+async def test_the_exact_search_leaves_statement_timeout_as_it_found_it(
+    catalog, natural_session
+) -> None:
+    """Under the ceiling the exact search is served and its savepoint
+    released, with statement_timeout back to what it was: a released
+    savepoint keeps its SET LOCAL until the transaction ends, and the agent's
+    turn goes on in this transaction."""
+    before = await _statement_timeout(natural_session)
+
+    # 303 datasets over the threshold, 500 asked for: "pocos", the exact
+    # search runs (on 305 chunks, far under the ceiling).
+    hits = await PgVectorSearchAdapter(natural_session).search_datasets_ann(
+        _query(catalog["dims"]), limit=500, min_similarity=0.40
+    )
+
+    assert {h.dataset_id for h in hits} == set(catalog["big_ids"]) | set(catalog["small_ids"])
+    assert await _statement_timeout(natural_session) == before
+
+
+async def test_past_the_ceiling_the_walk_is_served_and_the_transaction_goes_on(
+    catalog, natural_session, monkeypatch
+) -> None:
+    """What the unit tests' double imitates, on Postgres: statement_timeout
+    fires inside the savepoint, the rollback to it leaves the transaction
+    usable and takes the local timeout with it, and the walk's own settings
+    (set before the savepoint) stay."""
+    adapter = PgVectorSearchAdapter(natural_session)
+    walk = await adapter.search_datasets_hnsw(
+        _query(catalog["dims"]), limit=500, min_similarity=0.40
+    )
+    before = await _statement_timeout(natural_session)
+    monkeypatch.setattr(PgVectorSearchAdapter, "_EXACT_FALLBACK_TIMEOUT_MS", 50)
+    finished: list[bool] = []
+
+    async def _slow_exact(*args: object, **kwargs: object) -> list:
+        await natural_session.execute(text("SELECT pg_sleep(2)"))
+        finished.append(True)
+        return []
+
+    monkeypatch.setattr(adapter, "search_datasets_exact", _slow_exact)
+
+    hits = await adapter.search_datasets_ann(
+        _query(catalog["dims"]), limit=500, min_similarity=0.40
+    )
+
+    assert finished == []  # cancelled at 50 ms, not slept through
+    assert [h.dataset_id for h in hits] == [h.dataset_id for h in walk]
+    assert await _statement_timeout(natural_session) == before
+    ef = await natural_session.execute(text("SELECT current_setting('hnsw.ef_search')"))
+    assert ef.scalar() == str(PgVectorSearchAdapter._ANN_EF_SEARCH)
+
+
+async def test_control_without_a_savepoint_the_timeout_aborts_the_transaction(
+    catalog, natural_session
+) -> None:
+    """Control for the test above: the same timeout outside a savepoint leaves
+    the transaction accepting nothing but a rollback."""
+    await natural_session.execute(text("SELECT set_config('statement_timeout', '50', true)"))
+    with pytest.raises(DBAPIError, match="statement timeout"):
+        await natural_session.execute(text("SELECT pg_sleep(2)"))
+    with pytest.raises(DBAPIError, match="current transaction is aborted"):
+        await natural_session.execute(text("SELECT 1"))
+
+
+async def test_a_weak_top_walks_again_wider_on_the_index_before_the_exact_search(
+    catalog, natural_session
+) -> None:
+    """Review of #183: a weak top walks again with _ANN_WIDE_CANDIDATES before
+    the exact search. Both walks are planned on the index (no scan of every
+    chunk), the planner's setting comes back after each, and with the top
+    still weak the exact search (in its savepoint) answers."""
+    proxy = _ExplainTheWalk(natural_session)
+    hits = await PgVectorSearchAdapter(proxy).search_datasets_ann(
+        _weak_query(catalog["dims"]), limit=10, min_similarity=0.40
+    )
+
+    assert [p["candidates"] for _, p in proxy.walks] == [
+        PgVectorSearchAdapter._ANN_CANDIDATES,
+        PgVectorSearchAdapter._ANN_WIDE_CANDIDATES,
+    ]
+    for plan in proxy.plans:
+        assert "ix_dataset_chunks_embedding" in plan, plan
+        assert "Seq Scan on dataset_chunks" not in plan, plan
+    assert await _seqscan(natural_session) == "on"
+    assert len(hits) == 10
+    assert {h.dataset_id for h in hits} <= set(catalog["big_ids"])
+    assert hits[0].score < PgVectorSearchAdapter._ANN_WEAK_TOP_SCORE
+
+
+async def test_the_wide_walk_brings_what_the_first_one_did_and_more(
+    catalog, natural_session, monkeypatch
+) -> None:
+    """``search_datasets_index`` serves the wide walk's answer instead of the
+    first one's: on the same graph it starts where the first walk did and
+    goes further, so rank by rank it scores at least as high. 305 chunks fit
+    in 400 candidates, so the first walk is cut at 50 here to have a tail."""
+    monkeypatch.setattr(PgVectorSearchAdapter, "_ANN_CANDIDATES", 50)
+    adapter = PgVectorSearchAdapter(natural_session)
+    query = _weak_query(catalog["dims"])
+    narrow = await adapter.search_datasets_hnsw(query, limit=100, min_similarity=0.40)
+    wide = await adapter.search_datasets_hnsw(
+        query,
+        limit=100,
+        min_similarity=0.40,
+        candidates=PgVectorSearchAdapter._ANN_WIDE_CANDIDATES,
+    )
+
+    assert 0 < len(narrow) <= 50 and len(wide) == 100
+    assert all(w.score >= n.score - 1e-9 for w, n in zip(wide, narrow, strict=False))

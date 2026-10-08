@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -65,7 +65,12 @@ def test_detail_names_the_worst_queries() -> None:
 def test_detail_does_not_order_a_reindex() -> None:
     """Revisión del #176: el texto decía "REINDEX pendiente" y se leía como una
     orden (un REINDEX de ~1 GB en prod), cuando no está medido que arregle el
-    0,915 de staging. Dice qué significa una alerta fija y qué hacer."""
+    0,915 de staging. Dice qué significa una alerta fija y qué hacer.
+
+    Revisión del #183: el estado conocido no es un valor de una sola corrida.
+    El recorrido de 400 solo daba 0,905 o 0,855 según el embedding (bandas 90
+    y 85); lo que mide el canario ahora (con el recorrido ancho detrás) dio
+    0,915 en cinco juegos de embeddings (08-oct)."""
     detail = _report(1.0, 0.0, 0.5).detail_es()
     assert "REINDEX pendiente" not in detail
     assert "REINDEX no está medido como arreglo" in detail
@@ -73,7 +78,8 @@ def test_detail_does_not_order_a_reindex() -> None:
     # Qué es una alerta que queda fija y qué una que empeora.
     assert "misma banda" in detail and "estado conocido" in detail
     assert "baja de banda" in detail
-    assert "0,915" in detail
+    assert "0,915 con cinco juegos de embeddings" in detail
+    assert "0,905" not in detail
 
 
 def test_detail_says_what_the_alert_identity_does_with_a_fixed_band() -> None:
@@ -83,8 +89,11 @@ def test_detail_says_what_the_alert_identity_does_with_a_fixed_band() -> None:
     from app.application.quality.alerting import REOPEN_AT
 
     assert REOPEN_AT == (3, 10, 30, 100)  # lo que dice el docstring de detail_es
-    assert recall_band(0.915) == recall_band(0.90) == 90
+    assert recall_band(0.915) == recall_band(0.905) == recall_band(0.90) == 90
     assert recall_band(0.895) == 85
+    # Lo que daba el recorrido de 400 solo (08-oct): dos bandas según el
+    # embedding, o sea dos alertas que se alternan. Por eso no es lo que mide.
+    assert {recall_band(0.905), recall_band(0.855)} == {90, 85}
 
 
 def test_the_canary_queries_include_the_audits_fourteen() -> None:
@@ -134,6 +143,69 @@ def test_a_degraded_index_alerts_under_a_stable_identity() -> None:
 )
 def test_recall_band(recall: float, band: int) -> None:
     assert recall_band(recall) == band
+
+
+def test_the_canary_measures_what_the_index_serves_before_the_exact_search(
+    monkeypatch,
+) -> None:
+    """Revisión del #183: con 400 candidatos el recorrido solo daba 0,905 o
+    0,855 según el embedding, y la alerta saltaba entre las bandas 90 y 85.
+    El canario mide ``search_datasets_index`` (el recorrido y, si su top es
+    débil, el ancho), que es lo que el buscador sirve antes de la exacta."""
+    import asyncio
+
+    from app.infrastructure.adapters.llm import bedrock_embedding_adapter
+    from app.infrastructure.adapters.search.pgvector_search_adapter import (
+        PgVectorSearchAdapter,
+    )
+
+    calls: list[tuple[str, int]] = []
+
+    async def _index(self, vector, limit=10, *args, **kwargs):
+        calls.append(("index", limit))
+        return [_r(1, 0.70)]
+
+    async def _hnsw(self, *args, **kwargs):
+        raise AssertionError("el canario no mide el recorrido angosto solo")
+
+    async def _exact(self, vector, limit=10, *args, **kwargs):
+        calls.append(("exact", limit))
+        return [_r(1, 0.70)]
+
+    class _Embedder:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        async def embed(self, text_: str) -> list[float]:
+            return [0.1]
+
+    session = MagicMock()
+    session.execute = AsyncMock()
+    session.rollback = AsyncMock()
+
+    class _Factory:
+        def __call__(self):
+            return self
+
+        async def __aenter__(self):
+            return session
+
+        async def __aexit__(self, *exc) -> bool:
+            return False
+
+    engine = MagicMock()
+    engine.dispose = AsyncMock()
+    monkeypatch.setattr(PgVectorSearchAdapter, "search_datasets_index", _index)
+    monkeypatch.setattr(PgVectorSearchAdapter, "search_datasets_hnsw", _hnsw)
+    monkeypatch.setattr(PgVectorSearchAdapter, "search_datasets_exact", _exact)
+    monkeypatch.setattr(bedrock_embedding_adapter, "BedrockEmbeddingAdapter", _Embedder)
+    monkeypatch.setattr("sqlalchemy.ext.asyncio.create_async_engine", lambda *a, **k: engine)
+    monkeypatch.setattr("sqlalchemy.ext.asyncio.async_sessionmaker", lambda *a, **k: _Factory())
+
+    report = asyncio.run(search_canary_tasks._measure(("votaciones nominales",)))
+
+    assert calls == [("index", 10), ("exact", 10)]
+    assert [r.recall for r in report.results] == [1.0]
 
 
 def test_a_healthy_index_stays_quiet() -> None:
