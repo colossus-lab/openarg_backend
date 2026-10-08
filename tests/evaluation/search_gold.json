@@ -1,6 +1,6 @@
 {
  "version": "1.0",
- "descripcion": "Gold set de búsqueda (04-oct-2026). Cada consulta positiva declara la tabla correcta por título del dataset (regex, sin distinguir mayúsculas) y, si hace falta, el portal: el hit cuenta si un resultado del top-k matchea y tiene al menos una tabla con filas. Las tablas correctas se identificaron por catálogo (título + raw.cached_datasets con row_count > 0) en staging, no con la búsqueda vectorial que se evalúa. Las negativas son datos que OpenArg no tiene (verificado por título en staging): la búsqueda no debería devolver nada por encima de umbral_negativo. Prod no se pudo leer al armarlo; correr run_search_gold.py en prod y revisar a mano los casos que fallen antes de tomarlos como regresión.",
+ "descripcion": "Gold set de búsqueda (04-oct-2026). Cada consulta positiva declara la tabla correcta por título del dataset (regex, sin distinguir mayúsculas) y, si hace falta, el portal: el hit cuenta si un resultado del top-k matchea y tiene al menos una tabla con filas (o, si el esperado dice cuenta_sin_filas, sólo por título: lo que mide ese caso es la búsqueda, no las tablas). Las tablas correctas se identificaron por catálogo (título + raw.cached_datasets con row_count > 0) en staging, no con la búsqueda vectorial que se evalúa. Las negativas son datos que OpenArg no tiene (verificado por título en staging): la búsqueda no debería devolver nada por encima de umbral_negativo. Prod no se pudo leer al armarlo; correr run_search_gold.py en prod y revisar a mano los casos que fallen antes de tomarlos como regresión.",
  "umbral_negativo": 0.62,
  "calibracion_umbral": "staging, 04-oct-2026, mismo índice y mismas 62 consultas: puntaje del primer resultado de las positivas mediana 0,712 y mínimo 0,578 (Merval); de las negativas mediana 0,546 y máximo 0,674 (Mendoza para 'deuda pública nacional'). Con 0,62 queda una sola positiva por debajo. La búsqueda hoy nunca dice 'no tengo': min_similarity es 0,40.",
  "casos": [
@@ -495,6 +495,27 @@
      "titulo": "pr[oó]n[oó]stico del tiempo"
     }
    ]
+  },
+  {
+   "id": "busq_053",
+   "q": "votaciones nominales",
+   "esperado": [
+    {
+     "titulo": "^votaciones nominales$",
+     "cuenta_sin_filas": true
+    }
+   ],
+   "nota": "Revisión del #183 (08-oct): con 400 candidatos el recorrido queda atrapado en 4 de cada 5 embeddings (0,526: 'Legislativas provinciales 2017') y la exacta da 0,675 con 'Votaciones Nominales' arriba. Cuenta por título porque en staging sus tablas tienen 0 filas: lo que mide es que el recorrido no quede atrapado."
+  },
+  {
+   "id": "busq_054",
+   "q": "dólar oficial",
+   "esperado": [
+    {
+     "titulo": "cotizaciones cambiarias|tipo de cambio de valuaci[oó]n"
+    }
+   ],
+   "nota": "Revisión del #183 (08-oct): consulta débil (top de la exacta 0,557, justo arriba de _ANN_WEAK_TOP_SCORE). Con 400 candidatos el recorrido da 0,549 en 5 de 5 embeddings."
   },
   {
    "id": "neg_001",
