@@ -17,8 +17,8 @@
     { "id": "route_011", "query": "qué empresas se reunieron con Caputo", "expected_mart_id": "audiencias_gestion_intereses", "category": "accountability", "difficulty": "medium" },
     { "id": "route_012", "query": "lobby al gobierno argentino", "expected_mart_id": "audiencias_gestion_intereses", "category": "accountability", "difficulty": "medium" },
     { "id": "route_013", "query": "registro de gestión de intereses RUAGI", "expected_mart_id": "audiencias_gestion_intereses", "category": "accountability", "difficulty": "easy" },
-    { "id": "route_014", "query": "DDJJ funcionarios públicos", "expected_mart_id": "ddjj_funcionarios_federales", "category": "accountability", "difficulty": "easy" },
-    { "id": "route_015", "query": "patrimonio declarado funcionario nacional", "expected_mart_id": "ddjj_funcionarios_federales", "category": "accountability", "difficulty": "medium" },
+    { "id": "route_014", "query": "DDJJ funcionarios públicos", "expected_mart_id": null, "category": "accountability", "difficulty": "easy" },
+    { "id": "route_015", "query": "patrimonio declarado funcionario nacional", "expected_mart_id": null, "category": "accountability", "difficulty": "medium" },
 
     { "id": "route_020", "query": "empresas contaminantes Riachuelo", "expected_mart_id": "acumar_agentes_contaminantes", "category": "ambiente", "difficulty": "easy" },
     { "id": "route_021", "query": "agentes contaminantes Lanús La Matanza", "expected_mart_id": "acumar_agentes_contaminantes", "category": "ambiente", "difficulty": "medium" },

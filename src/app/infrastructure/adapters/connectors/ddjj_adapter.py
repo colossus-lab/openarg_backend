@@ -1,443 +1,675 @@
+"""Declaraciones juradas patrimoniales, servidas desde `raw.cache_ddjj_*`.
+
+Hasta el 08-oct-2026 este adaptador leía un JSON fijo con 195 diputados de 2024,
+cargado a mano desde PDFs y nunca actualizado. Ahora lee las tablas que carga
+`ddjj_tasks`:
+
+- **Oficina Anticorrupción** (`fuente = 'oficina_anticorrupcion'`, jurisdicción
+  nacional): 2012 en adelante, todos los que presentan ante la OA (Poder
+  Ejecutivo, Diputados, Senado, parte del Judicial y del Ministerio Público),
+  con el detalle de bienes y deudas.
+- **Ciudad de Buenos Aires** (`fuente = 'caba'`): 2023 en adelante, funcionarios
+  del Ejecutivo porteño, con el total de bienes por tipo y sin deudas (sin
+  patrimonio neto).
+
+Las cifras que no cierran se marcan al cargar (H005, ver `ddjj_tasks`):
+
+- `inconsistente`: el total de bienes no cierra con su propio detalle (o, en
+  CABA, pasa 1.000 veces la mediana del año). Queda fuera de rankings y
+  estadísticas.
+- `ingresos_inconsistentes`: el ahorro declarado no se refleja en los bienes.
+  Queda fuera sólo del ranking por ingresos.
+
+Las filas que se le pasan al modelo y al frontend conservan los nombres de
+antes (`patrimonio_cierre`, `bienes_detalle`, `resumen_bienes`…): las tarjetas
+de DDJJ del frontend los leen así.
+"""
+
 from __future__ import annotations
 
-import json
 import logging
 import re
-import statistics
 import time
 import unicodedata
+from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
-from pathlib import Path
+from decimal import Decimal
 from typing import Any
+
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.domain.entities.connectors.data_result import DataResult
 
 logger = logging.getLogger(__name__)
 
-# Path relative to the backend project root
-_DATA_PATH = Path(__file__).resolve().parent.parent.parent / "data" / "ddjj_dataset.json"
+TABLA = "raw.cache_ddjj_declaraciones"
+TABLA_BIENES = "raw.cache_ddjj_bienes"
 
+FUENTE_OA = "oficina_anticorrupcion"
+FUENTE_CABA = "caba"
+# jurisdicción que pide el agente → fuente de la tabla
+JURISDICCIONES = {"nacional": FUENTE_OA, "caba": FUENTE_CABA}
 
-def _strip_accents(text: str) -> str:
-    return "".join(c for c in unicodedata.normalize("NFD", text) if unicodedata.category(c) != "Mn")
+_PORTALES = {
+    FUENTE_OA: (
+        "Declaraciones Juradas Patrimoniales — Oficina Anticorrupción",
+        "https://datos.jus.gob.ar/dataset/declaraciones-juradas-patrimoniales-integrales",
+    ),
+    FUENTE_CABA: (
+        "Declaraciones Juradas — Ciudad de Buenos Aires",
+        "https://data.buenosaires.gob.ar/dataset/declaraciones-juradas",
+    ),
+}
+_NOMBRE_FUENTE = {FUENTE_OA: "Oficina Anticorrupción", FUENTE_CABA: "Ciudad de Buenos Aires"}
 
-
-def _name_matches(nombre: str, query: str) -> bool:
-    """Check if all query words appear in the name (order-independent)."""
-    nombre_norm = _strip_accents(nombre.lower())
-    words = _strip_accents(query.lower()).split()
-    return all(w in nombre_norm for w in words)
-
-
-_RE_ASSET_TYPE = re.compile(r"EN EL (?:PAIS|EXTERIOR)")
-
-
-def _summarize_assets(bienes: list[dict]) -> dict[str, float]:
-    summary: dict[str, float] = {}
-    for b in bienes:
-        cat = _RE_ASSET_TYPE.sub("", b.get("tipo", "")).strip()
-        summary[cat] = summary.get(cat, 0) + b.get("importe", 0)
-    return summary
-
-
-# H005 (independent review, 2026-10-05): the declared closing total
-# (``bienesCierre``) is checked against the declaration itself. The public part
-# rarely itemizes everything (the whole dataset carries only 3 company stakes),
-# so in 28 of the 192 DDJJ with itemized assets the total is more than twice the
-# item sum, and several of those are real fortunes whose total was already
-# declared at the start of the period. The base is therefore the larger of the
-# item sum and ``bienesInicio``: a total with history is backed. Against that
-# base the highest ratio in the dataset is 4.4, while the one bad load (a
-# closing total of $31,275.5 M against $66.2 M itemized and $56.8 M at start)
-# is 472; one order of magnitude leaves room on both sides. Downwards, a total
-# under a tenth of its own items doesn't add up either (the lowest ratio in the
-# dataset is 0.52, where one amount shows up twice in the detail, as a property
-# and as a credit).
-_MAX_TOTAL_VS_DETAIL = 10.0
-
-# Same idea for the declared income (``ingresosTrabajoNeto``): what is left
-# after personal expenses has to show up somewhere in the declaration, so it is
-# checked against the larger of the opening assets, the closing assets and the
-# opening debts (savings may have gone to pay them off). Gross income alone is
-# not enough: a deputy who spends what he earns and owns little is at 13.5×
-# (44.1 M earned, 42.4 M spent, 3.3 M in assets) and is legitimate. Net of
-# expenses, the highest ratio in the dataset is 5.1, while the one bad load
-# (5,016.3 M of income with no expenses against 36.9 M in assets; the median
-# declared income is 45.7 M) is 136. One order of magnitude again. With no
-# assets or debts declared there is nothing to check against.
-_MAX_SAVINGS_VS_ASSETS = 10.0
-
-# H005 review: nobody checked whether a figure comes like this from the Oficina
-# Anticorrupción or broke while converting the dataset, so the reason talks
-# about the record, never about the person.
-_NOT_COMPARABLE = (
-    "Es un probable error de carga o de conversión, no verificado contra la Oficina "
-    "Anticorrupción: esta DDJJ no es comparable y queda fuera de rankings, promedios y "
-    "variación patrimonial."
+# Una persona puede presentar varias en el mismo año (inicial, anual, baja): en
+# rankings, estadísticas y evolución cuenta una, la anual si la hay.
+_PRIORIDAD_TIPO = (
+    "CASE tipo WHEN 'Anual' THEN 0 WHEN 'Baja' THEN 1 WHEN 'Inicial' THEN 2 ELSE 3 END"
 )
-_INCOME_NOT_COMPARABLE = (
-    "Es un probable error de carga o de conversión, no verificado contra la Oficina "
-    "Anticorrupción: esos ingresos no son comparables y quedan fuera del ranking por ingresos."
+# CABA no trae CUIT: la persona es el nombre.
+_PERSONA = "coalesce(cuit, nombre)"
+_SIN_TILDES = "translate(upper({col}), 'ÁÉÍÓÚÜÑ', 'AEIOUUN')"
+
+_ORDEN = {"patrimonio": "patrimonio", "bienes": "bienes", "ingresos": "ingresos_netos"}
+
+_COBERTURA_TTL_S = 600
+
+# H005 review: nadie verificó si una cifra viene así de la fuente o se rompió al
+# publicarla, así que el motivo habla del registro, nunca de la persona.
+_NO_COMPARABLE = (
+    "Es un probable error de carga en el registro publicado, no verificado contra la "
+    "declaración original: esta DDJJ no es comparable y queda fuera de rankings, promedios "
+    "y variación patrimonial."
+)
+_INGRESOS_NO_COMPARABLES = (
+    "Lo que la declaración dice ahorrar no se refleja en sus bienes ni en sus deudas, así "
+    "que esos ingresos no son comparables y quedan fuera del ranking por ingresos (sus "
+    "bienes sí cierran y siguen en los demás rankings)."
 )
 
 
-def _millones(value: float) -> str:
+def _sin_tildes(texto: str) -> str:
+    return "".join(
+        c for c in unicodedata.normalize("NFD", texto) if unicodedata.category(c) != "Mn"
+    ).upper()
+
+
+def _escapar_like(valor: str) -> str:
+    return valor.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+def _numero(valor: Any) -> float | None:
+    if valor is None:
+        return None
+    if isinstance(valor, Decimal):
+        return float(valor)
+    return float(valor) if isinstance(valor, int | float) else None
+
+
+def _millones(valor: float) -> str:
     """``31275522665.75`` → ``"$31.275,5 millones"`` (es-AR)."""
-    text = f"{value / 1_000_000:,.1f}".replace(",", "_").replace(".", ",").replace("_", ".")
-    return f"${text} millones"
+    texto = f"{valor / 1_000_000:,.1f}".replace(",", "_").replace(".", ",").replace("_", ".")
+    return f"${texto} millones"
 
 
 def _veces(ratio: float) -> str:
-    """Truncated, never rounded up: 472.5 → ``"472"``."""
+    """Truncado, nunca redondeado para arriba: 472.5 → ``"472"``."""
     return f"{int(ratio):,}".replace(",", ".")
-
-
-def _inconsistency(r: dict) -> str | None:
-    """Why the closing total doesn't add up with its own declaration, or ``None``."""
-    bienes = r.get("bienes") or []
-    detalle = sum(float(b.get("importe") or 0) for b in bienes)
-    if detalle <= 0:
-        return None  # nothing itemized: nothing to check against
-    cierre = float(r.get("bienesCierre") or 0)
-    inicio = float(r.get("bienesInicio") or 0)
-    if cierre > _MAX_TOTAL_VS_DETAIL * max(detalle, inicio):
-        motivo = (
-            f"En el registro del dataset, el total de bienes al cierre ({_millones(cierre)}) es "
-            f"{_veces(cierre / detalle)} veces la suma de los {len(bienes)} bienes del detalle "
-            f"({_millones(detalle)})"
-        )
-        if inicio > 0:
-            motivo += f" y {_veces(cierre / inicio)} veces el total al inicio ({_millones(inicio)})"
-    elif cierre * _MAX_TOTAL_VS_DETAIL < detalle:
-        if cierre > 0:
-            motivo = (
-                f"En el registro del dataset, la suma de los {len(bienes)} bienes del detalle "
-                f"({_millones(detalle)}) es {_veces(detalle / cierre)} veces el total de bienes "
-                f"al cierre ({_millones(cierre)})"
-            )
-        else:
-            motivo = (
-                f"En el registro del dataset, el total de bienes al cierre es cero pero los "
-                f"{len(bienes)} bienes del detalle suman {_millones(detalle)}"
-            )
-    else:
-        return None
-    return f"{motivo}. {_NOT_COMPARABLE}"
-
-
-def _income_inconsistency(r: dict) -> str | None:
-    """Why the declared income doesn't add up with its own declaration, or ``None``."""
-    ingresos = float(r.get("ingresosTrabajoNeto") or 0)
-    gastos = float(r.get("gastosPersonales") or 0)
-    base = max(
-        float(r.get("bienesInicio") or 0),
-        float(r.get("bienesCierre") or 0),
-        float(r.get("deudasInicio") or 0),
-    )
-    if base <= 0 or ingresos - gastos <= _MAX_SAVINGS_VS_ASSETS * base:
-        return None
-    return (
-        f"En el registro del dataset, los ingresos netos del trabajo ({_millones(ingresos)}) "
-        f"menos los gastos personales ({_millones(gastos)}) son "
-        f"{_veces((ingresos - gastos) / base)} veces lo mayor entre los bienes al inicio, los "
-        f"bienes al cierre y las deudas al inicio ({_millones(base)}). {_INCOME_NOT_COMPARABLE}"
-    )
-
-
-def _excluded_from(r: dict, sort_key: str) -> bool:
-    """A record that doesn't add up stays out of rankings and aggregates.
-
-    A closing total that doesn't add up rules the whole DDJJ out; income that
-    doesn't add up only rules it out of the ranking by income.
-    """
-    if _inconsistency(r) is not None:
-        return True
-    return sort_key == "ingresosTrabajoNeto" and _income_inconsistency(r) is not None
-
-
-def _split_inconsistent(records: list[dict]) -> tuple[list[dict], list[str]]:
-    """Records usable for rankings/aggregates, and names of the excluded ones."""
-    usable: list[dict] = []
-    excluded: list[str] = []
-    for r in records:
-        if _inconsistency(r) is None:
-            usable.append(r)
-        else:
-            excluded.append(r.get("nombre", ""))
-    return usable, excluded
 
 
 def _declaraciones(n: int) -> str:
     return f"{n} declaración" if n == 1 else f"{n} declaraciones"
 
 
+def motivo_inconsistencia(fila: Mapping[str, Any]) -> str | None:
+    """Por qué el total de bienes no cierra, con los números de la fila, o ``None``."""
+    if not fila.get("inconsistente"):
+        return None
+    bienes = _numero(fila.get("bienes")) or 0.0
+    if fila.get("fuente") == FUENTE_CABA:
+        return (
+            f"En el registro de la Ciudad, el total de bienes ({_millones(bienes)}) pasa "
+            "1.000 veces la mediana de las declaraciones de ese año. " + _NO_COMPARABLE
+        )
+    inicial = fila.get("tipo") == "Inicial"
+    detalle = (
+        _numero(fila.get("detalle_bienes_inicio" if inicial else "detalle_bienes_cierre")) or 0.0
+    )
+    if detalle <= 0:
+        return f"En el registro de la Oficina Anticorrupción el total de bienes no cierra. {_NO_COMPARABLE}"
+    if bienes >= detalle:
+        motivo = (
+            f"En el registro de la Oficina Anticorrupción, el total de bienes ({_millones(bienes)}) "
+            f"es {_veces(bienes / detalle)} veces la suma de los bienes del detalle "
+            f"({_millones(detalle)})"
+        )
+    elif bienes > 0:
+        motivo = (
+            f"En el registro de la Oficina Anticorrupción, la suma de los bienes del detalle "
+            f"({_millones(detalle)}) es {_veces(detalle / bienes)} veces el total de bienes "
+            f"({_millones(bienes)})"
+        )
+    else:
+        motivo = (
+            "En el registro de la Oficina Anticorrupción, el total de bienes es cero pero los "
+            f"bienes del detalle suman {_millones(detalle)}"
+        )
+    return f"{motivo}. {_NO_COMPARABLE}"
+
+
+def motivo_ingresos(fila: Mapping[str, Any]) -> str | None:
+    if not fila.get("ingresos_inconsistentes"):
+        return None
+    ingresos = _numero(fila.get("ingresos_netos")) or 0.0
+    gastos = _numero(fila.get("gastos_personales")) or 0.0
+    base = max(
+        _numero(fila.get("bienes_inicio")) or 0.0,
+        _numero(fila.get("bienes_cierre")) or 0.0,
+        _numero(fila.get("deudas_inicio")) or 0.0,
+    )
+    if base <= 0:
+        return _INGRESOS_NO_COMPARABLES
+    return (
+        f"Los ingresos netos ({_millones(ingresos)}) menos los gastos personales "
+        f"({_millones(gastos)}) son {_veces((ingresos - gastos) / base)} veces lo mayor entre "
+        f"los bienes al inicio, los bienes al cierre y las deudas al inicio ({_millones(base)}). "
+        + _INGRESOS_NO_COMPARABLES
+    )
+
+
+_RE_TIPO_BIEN = re.compile(r"\s*EN EL (?:PAIS|EXTERIOR)\s*")
+
+
+def resumen_bienes(detalle: Sequence[Mapping[str, Any]]) -> dict[str, float]:
+    resumen: dict[str, float] = {}
+    for b in detalle:
+        tipo = _RE_TIPO_BIEN.sub(" ", str(b.get("tipo") or "OTROS")).strip()
+        resumen[tipo] = resumen.get(tipo, 0.0) + (_numero(b.get("importe")) or 0.0)
+    return resumen
+
+
+def registro(
+    fila: Mapping[str, Any],
+    detalle: Sequence[Mapping[str, Any]] | None = None,
+    *,
+    compacto: bool = False,
+) -> dict[str, Any]:
+    """Una fila de la tabla como la leen el modelo y las tarjetas del frontend.
+
+    Con ``compacto`` (rankings) no van el detalle ni el resumen de bienes, y las
+    marcas sólo cuando valen true: con todo, un top 20 pasaba el tope del
+    contenido de la herramienta (FR-004a / FIX-007).
+    """
+    motivo = motivo_inconsistencia(fila)
+    motivo_ing = motivo_ingresos(fila)
+    fuente = str(fila.get("fuente") or "")
+    row: dict[str, Any] = {
+        "fuente": _NOMBRE_FUENTE.get(fuente, fuente),
+        "cuit": fila.get("cuit") or "",
+        "nombre": fila.get("nombre") or "",
+        "cargo": fila.get("cargo") or "",
+        "organismo": fila.get("organismo") or "",
+        "poder": fila.get("poder") or "",
+        "anio_declaracion": fila.get("anio"),
+        "tipo_declaracion": fila.get("tipo") or "",
+        "bienes_cierre": _numero(fila.get("bienes")),
+        "deudas_cierre": _numero(fila.get("deudas")),
+        "patrimonio_cierre": _numero(fila.get("patrimonio")),
+        "variacion_patrimonial": _numero(fila.get("variacion_patrimonial")),
+        "ingresos_trabajo_neto": _numero(fila.get("ingresos_netos")),
+        "gastos_personales": _numero(fila.get("gastos_personales")),
+    }
+    if fuente == FUENTE_CABA:
+        row["nota"] = "La Ciudad publica sólo bienes, sin deudas: no hay patrimonio neto."
+    if not compacto or motivo is not None:
+        row["inconsistente"] = motivo is not None
+    if not compacto or motivo_ing is not None:
+        row["ingresos_inconsistentes"] = motivo_ing is not None
+    if motivo is not None:
+        # Los totales declarados quedan visibles (es lo que dice la DDJJ), pero la
+        # variación de un total que no cierra no es una variación.
+        row["motivo_inconsistencia"] = motivo
+        row["variacion_patrimonial"] = None
+    if motivo_ing is not None:
+        row["motivo_inconsistencia_ingresos"] = motivo_ing
+    if not compacto:
+        if detalle is not None:
+            row["cantidad_bienes"] = len(detalle)
+            row["bienes_detalle"] = [
+                {
+                    "tipo": b.get("tipo") or "",
+                    "descripcion": b.get("descripcion") or "",
+                    "importe": _numero(b.get("importe")),
+                    "titularidad": ""
+                    if b.get("titularidad") is None
+                    else f"{_numero(b['titularidad']):g}%",
+                }
+                for b in detalle
+            ]
+            row["resumen_bienes"] = resumen_bienes(detalle)
+        elif isinstance(fila.get("bienes_por_tipo"), dict):
+            row["resumen_bienes"] = {
+                k.replace("_", " ").upper(): float(v) for k, v in fila["bienes_por_tipo"].items()
+            }
+        row["url_fuente"] = fila.get("url_fuente") or ""
+    return row
+
+
+def _patrones_cargo(cargo: str) -> list[str]:
+    """Patrones LIKE para el cargo, sin género y desde el principio.
+
+    "diputado nacional" tiene que traer "DIPUTADA NACIONAL" y "Diputado Nacional
+    por la Provincia de Córdoba", pero no "CANDIDATO A DIPUTADO NACIONAL" ni
+    "ASESOR DEL DIPUTADO": en 2024, contener "DIPUTADO NACIONAL" traía 388
+    personas para 257 bancas. La primera palabra va al principio del cargo y las
+    demás en cualquier lugar; una palabra terminada en o/a vale por las dos.
+    """
+    palabras = [p for p in re.split(r"[\s,/]+", _sin_tildes(cargo)) if p]
+    patrones = []
+    for i, palabra in enumerate(palabras[:5]):
+        raiz = palabra[:-1] if len(palabra) > 3 and palabra[-1] in "OA" else palabra
+        raiz = _escapar_like(raiz)
+        patrones.append(f"{raiz}%" if i == 0 else f"%{raiz}%")
+    return patrones
+
+
 class DDJJAdapter:
-    """In-memory DDJJ dataset loaded once at startup (singleton)."""
+    """Consultas sobre `raw.cache_ddjj_declaraciones` (async, como `StaffAdapter`)."""
 
-    _BACKOFF_BASE = 60
-    _BACKOFF_CAP = 3600
+    def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
+        self._session_factory = session_factory
+        self._cobertura: dict[str, tuple[int, int]] = {}
+        self._cobertura_hasta = 0.0
 
-    def __init__(self) -> None:
-        self._dataset: list[dict] = []
-        self._loaded = False
-        self._fail_count: int = 0
-        self._next_retry_at: float = 0.0
+    # ── helpers ─────────────────────────────────────────────
 
-    @property
-    def record_count(self) -> int:
-        """Public accessor for health checks."""
-        self._ensure_loaded()
-        return len(self._dataset)
+    async def _filas(self, sql: str, params: Mapping[str, Any]) -> list[dict[str, Any]]:
+        async with self._session_factory() as session:
+            res = await session.execute(text(sql), dict(params))
+            return [dict(r._mapping) for r in res]
 
-    def _ensure_loaded(self) -> None:
-        if self._loaded:
-            return
-        if self._fail_count > 0 and time.monotonic() < self._next_retry_at:
-            return
-        try:
-            raw = _DATA_PATH.read_text(encoding="utf-8")
-            self._dataset = json.loads(raw)
-            self._loaded = True
-            self._fail_count = 0
-            logger.info("DDJJ dataset loaded: %d records from %s", len(self._dataset), _DATA_PATH)
-        except FileNotFoundError:
-            self._fail_count += 1
-            delay = min(self._BACKOFF_BASE * (2 ** (self._fail_count - 1)), self._BACKOFF_CAP)
-            self._next_retry_at = time.monotonic() + delay
-            logger.error(
-                "DDJJ dataset file not found: %s (attempt %d, next retry in %ds)",
-                _DATA_PATH,
-                self._fail_count,
-                delay,
+    async def cobertura(self) -> dict[str, tuple[int, int]]:
+        """Primer y último año por fuente (cacheado unos minutos)."""
+        if self._cobertura and time.monotonic() < self._cobertura_hasta:
+            return self._cobertura
+        filas = await self._filas(
+            f"SELECT fuente, min(anio) AS desde, max(anio) AS hasta FROM {TABLA} GROUP BY fuente",
+            {},
+        )
+        self._cobertura = {str(f["fuente"]): (int(f["desde"]), int(f["hasta"])) for f in filas}
+        self._cobertura_hasta = time.monotonic() + _COBERTURA_TTL_S
+        return self._cobertura
+
+    async def contar(self) -> int:
+        """Cuántas declaraciones hay (estimado de Postgres, para el health check)."""
+        filas = await self._filas(
+            "SELECT GREATEST(reltuples, 0)::bigint AS n FROM pg_class WHERE oid = to_regclass(:t)",
+            {"t": TABLA},
+        )
+        return int(filas[0]["n"]) if filas else 0
+
+    def describir_cobertura(self, cobertura: Mapping[str, tuple[int, int]]) -> str:
+        partes = []
+        if FUENTE_OA in cobertura:
+            desde, hasta = cobertura[FUENTE_OA]
+            partes.append(
+                f"Oficina Anticorrupción {desde}–{hasta} (funcionarios nacionales: Poder "
+                "Ejecutivo, diputados, senadores, parte del Poder Judicial y del Ministerio "
+                "Público)"
             )
-            self._dataset = []
-        except Exception:
-            self._fail_count += 1
-            delay = min(self._BACKOFF_BASE * (2 ** (self._fail_count - 1)), self._BACKOFF_CAP)
-            self._next_retry_at = time.monotonic() + delay
-            logger.error(
-                "Failed to load DDJJ dataset from %s (attempt %d, next retry in %ds)",
-                _DATA_PATH,
-                self._fail_count,
-                delay,
-                exc_info=True,
-            )
-            self._dataset = []
+        if FUENTE_CABA in cobertura:
+            desde, hasta = cobertura[FUENTE_CABA]
+            partes.append(f"Ciudad de Buenos Aires {desde}–{hasta} (Poder Ejecutivo porteño)")
+        return "; ".join(partes) or "sin declaraciones cargadas"
 
-    def search(self, query: str, limit: int = 20) -> DataResult:
-        self._ensure_loaded()
-        q_clean = _strip_accents(query.lower()).replace("-", "")
-        # Early-termination search instead of scanning all records then slicing
-        matches: list[dict] = []
-        for r in self._dataset:
-            if _name_matches(r.get("nombre", ""), query) or q_clean in r.get("cuit", "").replace(
-                "-", ""
-            ):
-                matches.append(r)
-                if len(matches) >= limit:
-                    break
-        return self._to_data_result(f'Búsqueda DDJJ: "{query}"', matches)
+    def _resultado(
+        self,
+        titulo: str,
+        records: list[dict[str, Any]],
+        *,
+        fuente: str | None = None,
+        descripcion: str = "",
+        **metadata: Any,
+    ) -> DataResult:
+        portal, url = _PORTALES.get(fuente or FUENTE_OA, _PORTALES[FUENTE_OA])
+        if fuente is None:
+            portal = "Declaraciones Juradas Patrimoniales"
+        return DataResult(
+            source=f"ddjj:{fuente or 'todas'}",
+            portal_name=portal,
+            portal_url=url,
+            dataset_title=titulo,
+            format="json",
+            records=records,
+            metadata={
+                "total_records": len(records),
+                "fetched_at": datetime.now(UTC).isoformat(),
+                "description": descripcion
+                or "Declaraciones juradas patrimoniales — parte pública (sin grupo familiar)",
+                **metadata,
+            },
+        )
 
-    def ranking(
+    @staticmethod
+    def _condicion_nombre(consulta: str, params: dict[str, Any]) -> str:
+        """Todas las palabras de la consulta en el nombre, sin importar orden ni tildes;
+        o el CUIT, si la consulta es un número."""
+        digitos = re.sub(r"[\s\-.]", "", consulta)
+        if len(digitos) >= 7 and digitos.isdigit():
+            params["cuit"] = f"%{digitos}%"
+            return "cuit LIKE :cuit"
+        palabras = [p for p in re.split(r"[\s,]+", _sin_tildes(consulta)) if p]
+        if not palabras:
+            return "false"
+        condiciones = []
+        for i, palabra in enumerate(palabras[:6]):
+            params[f"p{i}"] = f"%{_escapar_like(palabra)}%"
+            condiciones.append(f"{_SIN_TILDES.format(col='nombre')} LIKE :p{i}")
+        return " AND ".join(condiciones)
+
+    async def _anio_por_defecto(self, fuente: str) -> int | None:
+        cobertura = await self.cobertura()
+        return cobertura.get(fuente, (None, None))[1]
+
+    @staticmethod
+    def _filtros(
+        params: dict[str, Any],
+        *,
+        poder: str | None,
+        organismo: str | None,
+        cargo: str | None,
+    ) -> str:
+        condiciones = []
+        if poder:
+            params["poder"] = poder
+            condiciones.append("poder = :poder")
+        if organismo:
+            params["organismo"] = f"%{_escapar_like(_sin_tildes(organismo))}%"
+            condiciones.append(f"{_SIN_TILDES.format(col='organismo')} LIKE :organismo")
+        for i, patron in enumerate(_patrones_cargo(cargo or "")):
+            params[f"cargo{i}"] = patron
+            condiciones.append(f"ltrim({_SIN_TILDES.format(col='cargo')}) LIKE :cargo{i}")
+        return "".join(f" AND {c}" for c in condiciones)
+
+    async def _detalle(self, dj_ids: Sequence[int], periodos: Mapping[int, str]) -> dict[int, list]:
+        """El detalle de bienes de la OA del período declarado de cada DDJJ."""
+        if not dj_ids:
+            return {}
+        filas = await self._filas(
+            f"SELECT dj_id, periodo, tipo, descripcion, titularidad, importe FROM {TABLA_BIENES} "
+            "WHERE dj_id = ANY(:ids) ORDER BY dj_id, importe DESC NULLS LAST",
+            {"ids": list(dj_ids)},
+        )
+        detalle: dict[int, list] = {i: [] for i in dj_ids}
+        for f in filas:
+            if f["periodo"] == periodos.get(f["dj_id"]):
+                detalle[f["dj_id"]].append(f)
+        return detalle
+
+    # ── consultas ───────────────────────────────────────────
+
+    async def search(
+        self,
+        query: str,
+        limit: int = 10,
+        *,
+        anio: int | None = None,
+        jurisdiccion: str | None = None,
+    ) -> DataResult:
+        """Declaraciones de una persona (por nombre o CUIT), la más nueva primero."""
+        params: dict[str, Any] = {"lim": limit}
+        condicion = self._condicion_nombre(query, params)
+        if anio:
+            params["anio"] = anio
+            condicion += " AND anio = :anio"
+        fuente = JURISDICCIONES.get(jurisdiccion or "")
+        if fuente:
+            params["fuente"] = fuente
+            condicion += " AND fuente = :fuente"
+        filas = await self._filas(
+            f"SELECT * FROM {TABLA} WHERE {condicion} "
+            f"ORDER BY anio DESC, nombre, {_PRIORIDAD_TIPO}, dj_id DESC LIMIT :lim",
+            params,
+        )
+        oa = [f for f in filas if f["fuente"] == FUENTE_OA]
+        detalle = await self._detalle(
+            [f["dj_id"] for f in oa],
+            {f["dj_id"]: "inicio" if f["tipo"] == "Inicial" else "cierre" for f in oa},
+        )
+        records = [
+            registro(f, detalle.get(f["dj_id"]) if f["fuente"] == FUENTE_OA else None)
+            for f in filas
+        ]
+        resultado = self._resultado(f'Búsqueda DDJJ: "{query}"', records, fuente=fuente)
+        if not records:
+            resultado.metadata["cobertura"] = self.describir_cobertura(await self.cobertura())
+        return resultado
+
+    async def get_by_name(self, name: str) -> DataResult:
+        return await self.search(name, 5)
+
+    async def ranking(
         self,
         sort_by: str = "patrimonio",
         top: int = 10,
         order: str = "desc",
+        *,
+        anio: int | None = None,
+        jurisdiccion: str | None = "nacional",
+        poder: str | None = None,
+        organismo: str | None = None,
+        cargo: str | None = None,
     ) -> DataResult:
-        self._ensure_loaded()
-        key_map = {
-            "patrimonio": "patrimonioCierre",
-            "ingresos": "ingresosTrabajoNeto",
-            "bienes": "bienesCierre",
-        }
-        sort_key = key_map.get(sort_by, "patrimonioCierre")
-        sorted_ds = sorted(
-            self._dataset,
-            key=lambda r: r.get(sort_key, 0),
-            reverse=(order == "desc"),
+        fuente = JURISDICCIONES.get(jurisdiccion or "nacional", FUENTE_OA)
+        if fuente == FUENTE_CABA and sort_by == "patrimonio":
+            # Sin deudas no hay patrimonio neto: el ranking de la Ciudad es por bienes.
+            sort_by = "bienes"
+        columna = _ORDEN.get(sort_by, "patrimonio")
+        anio = anio or await self._anio_por_defecto(fuente)
+        params: dict[str, Any] = {"fuente": fuente, "anio": anio, "top": top}
+        filtros = self._filtros(params, poder=poder, organismo=organismo, cargo=cargo)
+        excluye = "inconsistente" + (" OR ingresos_inconsistentes" if sort_by == "ingresos" else "")
+        direccion = "DESC" if order == "desc" else "ASC"
+        base = (
+            f"WITH base AS (SELECT DISTINCT ON ({_PERSONA}) * FROM {TABLA} "
+            f"WHERE fuente = :fuente AND anio = :anio AND {columna} IS NOT NULL{filtros} "
+            f"ORDER BY {_PERSONA}, {_PRIORIDAD_TIPO}, rectificativa DESC NULLS LAST, dj_id DESC) "
         )
-        # H005: a DDJJ whose figures don't add up never enters a ranking. Only
-        # the ones that would have made the cut are reported, and the model only
-        # gets how many: naming them in every ranking ("the 3 poorest") tied a
-        # person to a bad record in answers that had nothing to do with them.
-        top_records = [r for r in sorted_ds if not _excluded_from(r, sort_key)][:top]
-        excluded = [r.get("nombre", "") for r in sorted_ds[:top] if _excluded_from(r, sort_key)]
-        label = "mayor" if order == "desc" else "menor"
-        # FR-004a: ranking rows MUST be compact. Passing ``compact=True``
-        # strips ``bienes_detalle``, ``bienes`` and ``resumen_bienes`` so
-        # the analyst fits all N records in its output budget. See
-        # FIX-007 in ``specs/FIX_BACKLOG.md``.
-        result = self._to_data_result(
-            f"Ranking: {top} diputados con {label} {sort_by}",
-            top_records,
-            compact=True,
+        filas = await self._filas(
+            base + f"SELECT * FROM base WHERE NOT ({excluye}) "
+            f"ORDER BY {columna} {direccion}, nombre LIMIT :top",
+            params,
         )
-        # Row order is the rank: _extract_documents must not skip a card.
-        result.metadata["ranking"] = True
-        if excluded:
-            verbo = "excluyó" if len(excluded) == 1 else "excluyeron"
-            habria = "habría" if len(excluded) == 1 else "habrían"
-            result.metadata["excluidas_por_inconsistencia"] = len(excluded)
-            # Audit only: never handed to the model.
-            result.metadata["excluidas_por_inconsistencia_nombres"] = excluded
-            result.metadata["description"] += (
-                f". Se {verbo} {_declaraciones(len(excluded))} que {habria} entrado en este "
-                "ranking: su registro en el dataset tiene cifras que no cierran con la propia "
-                "DDJJ (probable error de carga), así que no es comparable "
+        # H005: una DDJJ cuyas cifras no cierran nunca entra a un ranking. Sólo se
+        # cuentan las que habrían entrado en el recorte, y el modelo recibe cuántas:
+        # nombrarlas en cada ranking («los 3 más pobres») ataba a una persona a un
+        # registro roto en respuestas que no tenían que ver con ella.
+        crudas = await self._filas(
+            base + f"SELECT nombre, ({excluye}) AS excluida FROM base "
+            f"ORDER BY {columna} {direccion}, nombre LIMIT :top",
+            params,
+        )
+        excluidas = [str(f["nombre"]) for f in crudas if f["excluida"]]
+        etiqueta = "mayor" if order == "desc" else "menor"
+        quienes = {FUENTE_OA: "funcionarios nacionales", FUENTE_CABA: "funcionarios porteños"}[
+            fuente
+        ]
+        alcance = ", ".join(x for x in (poder, organismo, cargo) if x)
+        descripcion = (
+            f"Ranking de {quienes} con {etiqueta} {sort_by} declarado en {anio}"
+            + (f" ({alcance})" if alcance else "")
+            + ". Una declaración por persona (la anual si presentó varias)."
+        )
+        resultado = self._resultado(
+            f"Ranking DDJJ {anio}: {top} {quienes} con {etiqueta} {sort_by}",
+            [registro(f, compacto=True) for f in filas],
+            fuente=fuente,
+            descripcion=descripcion,
+            ranking=True,  # el orden de las filas es el puesto: las tarjetas no se saltean
+            anio=anio,
+        )
+        if excluidas:
+            verbo = "excluyó" if len(excluidas) == 1 else "excluyeron"
+            habria = "habría" if len(excluidas) == 1 else "habrían"
+            resultado.metadata["excluidas_por_inconsistencia"] = len(excluidas)
+            # Sólo para auditoría: nunca le llega al modelo.
+            resultado.metadata["excluidas_por_inconsistencia_nombres"] = excluidas
+            resultado.metadata["description"] += (
+                f" Se {verbo} {_declaraciones(len(excluidas))} que {habria} entrado en este "
+                "ranking: su registro publicado tiene cifras que no cierran con la propia DDJJ "
+                "(probable error de carga), así que no es comparable "
                 "(excluidas_por_inconsistencia)."
             )
-        return result
+        return resultado
 
-    def get_by_name(self, name: str) -> DataResult:
-        self._ensure_loaded()
-        matches = [r for r in self._dataset if _name_matches(r.get("nombre", ""), name)][:5]
-        return self._to_data_result(f'DDJJ de "{name}"', matches)
-
-    def stats(self) -> DataResult:
-        self._ensure_loaded()
-        # H005: averages, median, max and min leave out the DDJJ whose total
-        # doesn't add up (a single bad load moved the average from 351 M to 509 M).
-        usable, excluded = _split_inconsistent(self._dataset)
-        if not usable:
-            return DataResult(
-                source="ddjj:oficina_anticorrupcion",
-                portal_name="Declaraciones Juradas Patrimoniales — Oficina Anticorrupción",
-                portal_url="https://www.argentina.gob.ar/anticorrupcion/consultar-declaraciones-juradas-de-funcionarios-publicos",
-                dataset_title="Estadísticas DDJJ",
-                format="json",
-                records=[],
-                metadata={"total_records": 0, "fetched_at": datetime.now(UTC).isoformat()},
-            )
-
-        # Single pass: collect min, max, sum and the values for the median
-        total = len(self._dataset)
-        n = len(usable)
-        suma = 0.0
-        max_val, min_val = float("-inf"), float("inf")
-        max_r = min_r = usable[0]
-        patrimonios: list[float] = []
-        for r in usable:
-            p = r.get("patrimonioCierre", 0)
-            patrimonios.append(p)
-            suma += p
-            if p > max_val:
-                max_val, max_r = p, r
-            if p < min_val:
-                min_val, min_r = p, r
-
-        stats_record = {
-            "total": total,
-            "anio": self._dataset[0].get("anioDeclaracion", ""),
-            "patrimonio_promedio": suma / n,
-            # #170 check: ``patrimonios[n // 2]`` is the upper middle value
-            # when n is even (101.9 M with the 194 usable DDJJ; the median is
-            # 98.9 M, 3 % off).
-            "patrimonio_mediano": statistics.median(patrimonios),
-            # The tool description promised this count and the row didn't
-            # carry it: the model read the minimum (one person) as the count.
-            "cantidad_con_patrimonio_negativo": sum(1 for p in patrimonios if p < 0),
-            "patrimonio_maximo_nombre": max_r.get("nombre", ""),
-            "patrimonio_maximo_monto": max_r.get("patrimonioCierre", 0),
-            "patrimonio_minimo_nombre": min_r.get("nombre", ""),
-            "patrimonio_minimo_monto": min_r.get("patrimonioCierre", 0),
+    async def stats(
+        self,
+        *,
+        anio: int | None = None,
+        jurisdiccion: str | None = "nacional",
+        poder: str | None = None,
+        organismo: str | None = None,
+        cargo: str | None = None,
+    ) -> DataResult:
+        fuente = JURISDICCIONES.get(jurisdiccion or "nacional", FUENTE_OA)
+        medida = "patrimonio" if fuente == FUENTE_OA else "bienes"
+        anio = anio or await self._anio_por_defecto(fuente)
+        params: dict[str, Any] = {"fuente": fuente, "anio": anio}
+        filtros = self._filtros(params, poder=poder, organismo=organismo, cargo=cargo)
+        base = (
+            f"WITH base AS (SELECT DISTINCT ON ({_PERSONA}) * FROM {TABLA} "
+            f"WHERE fuente = :fuente AND anio = :anio{filtros} "
+            f"ORDER BY {_PERSONA}, {_PRIORIDAD_TIPO}, rectificativa DESC NULLS LAST, dj_id DESC), "
+            f"usables AS (SELECT * FROM base WHERE NOT inconsistente AND {medida} IS NOT NULL) "
+        )
+        [agregado] = await self._filas(
+            base
+            + f"""
+            SELECT (SELECT count(*) FROM base) AS total,
+                   (SELECT count(*) FROM base WHERE inconsistente) AS excluidas,
+                   count(*) AS usables,
+                   avg({medida}) AS promedio,
+                   percentile_cont(0.5) WITHIN GROUP (ORDER BY {medida}) AS mediana,
+                   count(*) FILTER (WHERE {medida} < 0) AS negativos
+            FROM usables
+            """,
+            params,
+        )
+        extremos = await self._filas(
+            base + f"(SELECT 'max' AS cual, nombre, {medida} AS monto FROM usables "
+            f"ORDER BY {medida} DESC LIMIT 1) UNION ALL "
+            f"(SELECT 'min', nombre, {medida} FROM usables ORDER BY {medida} ASC LIMIT 1)",
+            params,
+        )
+        quienes = {FUENTE_OA: "funcionarios nacionales", FUENTE_CABA: "funcionarios porteños"}[
+            fuente
+        ]
+        if not agregado["usables"]:
+            return self._resultado(f"Estadísticas DDJJ {anio}", [], fuente=fuente)
+        por_extremo = {e["cual"]: e for e in extremos}
+        fila: dict[str, Any] = {
+            "total": int(agregado["total"]),
+            "anio": anio,
+            "alcance": quienes + "".join(f", {x}" for x in (poder, organismo, cargo) if x),
+            f"{medida}_promedio": _numero(agregado["promedio"]),
+            # La mediana de verdad: con una cantidad par, el promedio de los dos centrales.
+            f"{medida}_mediano": _numero(agregado["mediana"]),
+            f"{medida}_maximo_nombre": por_extremo["max"]["nombre"],
+            f"{medida}_maximo_monto": _numero(por_extremo["max"]["monto"]),
+            f"{medida}_minimo_nombre": por_extremo["min"]["nombre"],
+            f"{medida}_minimo_monto": _numero(por_extremo["min"]["monto"]),
         }
-        description = f"Estadísticas agregadas de {total} declaraciones juradas patrimoniales"
-        metadata: dict[str, Any] = {
-            "total_records": 1,
-            "fetched_at": datetime.now(UTC).isoformat(),
-        }
-        if excluded:
-            # The stats row reaches the model: how many, never who.
-            stats_record["excluidas_por_inconsistencia"] = len(excluded)
-            metadata["excluidas_por_inconsistencia_nombres"] = excluded
-            description += (
-                ". Promedio, mediana, máximo, mínimo y cantidad con patrimonio negativo "
-                f"calculados sin {_declaraciones(len(excluded))} cuyo registro en el dataset "
-                "tiene un total de "
-                "bienes que no cierra con su propio detalle (probable error de carga; "
+        if medida == "patrimonio":
+            # La descripción de la herramienta promete este conteo; sin él, el modelo
+            # leía el mínimo (una persona) como la cantidad.
+            fila["cantidad_con_patrimonio_negativo"] = int(agregado["negativos"])
+        else:
+            fila["nota"] = "La Ciudad publica sólo bienes, sin deudas: no hay patrimonio neto."
+        descripcion = (
+            f"Estadísticas de {int(agregado['total'])} declaraciones juradas de {quienes} de "
+            f"{anio} (una por persona)"
+        )
+        metadata: dict[str, Any] = {"anio": anio}
+        if agregado["excluidas"]:
+            # Al modelo le llega cuántas, nunca quiénes.
+            fila["excluidas_por_inconsistencia"] = int(agregado["excluidas"])
+            descripcion += (
+                f". Promedio, mediana, máximo y mínimo calculados sin "
+                f"{_declaraciones(int(agregado['excluidas']))} cuyo registro publicado tiene un "
+                "total de bienes que no cierra con su propio detalle (probable error de carga; "
                 "excluidas_por_inconsistencia)."
             )
-        metadata["description"] = description
-        return DataResult(
-            source="ddjj:oficina_anticorrupcion",
-            portal_name="Declaraciones Juradas Patrimoniales — Oficina Anticorrupción",
-            portal_url="https://www.argentina.gob.ar/anticorrupcion/consultar-declaraciones-juradas-de-funcionarios-publicos",
-            dataset_title="Estadísticas DDJJ Diputados Nacionales",
-            format="json",
-            records=[stats_record],
-            metadata=metadata,
+        return self._resultado(
+            f"Estadísticas DDJJ {anio}: {quienes}",
+            [fila],
+            fuente=fuente,
+            descripcion=descripcion,
+            **metadata,
         )
 
-    def _to_data_result(
-        self,
-        title: str,
-        records: list[dict],
-        *,
-        compact: bool = False,
-    ) -> DataResult:
-        """Format records as a DataResult.
-
-        When ``compact=True`` the per-asset ``bienes_detalle`` and the
-        grouped ``resumen_bienes`` are omitted so each row stays under
-        ~500 chars. Used by ``ranking()`` (FR-004a / FIX-007) where the
-        analyst has to fit N rows in its output budget and elaborating
-        every asset would blow past ``max_tokens`` after ~4 rows.
-        """
-        now = datetime.now(UTC).isoformat()
-        formatted = []
-        for r in records:
-            bienes = r.get("bienes", [])
-            motivo = _inconsistency(r)
-            motivo_ingresos = _income_inconsistency(r)
-            row: dict[str, Any] = {
-                "cuit": r.get("cuit", ""),
-                "nombre": r.get("nombre", ""),
-                "sexo": r.get("sexo", ""),
-                "fecha_nacimiento": r.get("fechaNacimiento", ""),
-                "estado_civil": r.get("estadoCivil", ""),
-                "cargo": r.get("cargo", ""),
-                "organismo": r.get("organismo", ""),
-                "anio_declaracion": r.get("anioDeclaracion", ""),
-                "tipo_declaracion": r.get("tipoDeclaracion", ""),
-                "bienes_inicio": r.get("bienesInicio", 0),
-                "deudas_inicio": r.get("deudasInicio", 0),
-                "bienes_cierre": r.get("bienesCierre", 0),
-                "deudas_cierre": r.get("deudasCierre", 0),
-                "patrimonio_cierre": r.get("patrimonioCierre", 0),
-                "variacion_patrimonial": r.get("bienesCierre", 0) - r.get("bienesInicio", 0),
-                "ingresos_trabajo_neto": r.get("ingresosTrabajoNeto", 0),
-                "gastos_personales": r.get("gastosPersonales", 0),
-                "cantidad_bienes": len(bienes),
-            }
-            # Compact ranking rows only carry the flags when true: two
-            # ``false`` per row pushed a top 20 past the tool's content cap.
-            if not compact or motivo is not None:
-                row["inconsistente"] = motivo is not None
-            if not compact or motivo_ingresos is not None:
-                row["ingresos_inconsistentes"] = motivo_ingresos is not None
-            if motivo is not None:
-                # H005: the declared totals stay visible (it's what the DDJJ
-                # says), but the variation of a total that doesn't add up is not
-                # a variation.
-                row["motivo_inconsistencia"] = motivo
-                row["variacion_patrimonial"] = None
-            if motivo_ingresos is not None:
-                row["motivo_inconsistencia_ingresos"] = motivo_ingresos
-            if not compact:
-                row["bienes_detalle"] = bienes
-                row["resumen_bienes"] = _summarize_assets(bienes)
-            formatted.append(row)
-
-        return DataResult(
-            source="ddjj:oficina_anticorrupcion",
-            portal_name="Declaraciones Juradas Patrimoniales — Oficina Anticorrupción",
-            portal_url="https://www.argentina.gob.ar/anticorrupcion/consultar-declaraciones-juradas-de-funcionarios-publicos",
-            dataset_title=title,
-            format="json",
-            records=formatted,
-            metadata={
-                "total_records": len(formatted),
-                "fetched_at": now,
-                "description": "Declaraciones Juradas Patrimoniales Integrales de Diputados Nacionales — Parte Pública",
-            },
+    async def evolucion(self, persona: str, *, jurisdiccion: str | None = None) -> DataResult:
+        """Lo declarado por una persona, año por año. Si el nombre coincide con varias
+        personas, devuelve la lista para que se elija (por CUIT)."""
+        params: dict[str, Any] = {}
+        condicion = self._condicion_nombre(persona, params)
+        fuente = JURISDICCIONES.get(jurisdiccion or "")
+        if fuente:
+            params["fuente"] = fuente
+            condicion += " AND fuente = :fuente"
+        personas = await self._filas(
+            f"SELECT fuente, {_PERSONA} AS persona, max(nombre) AS nombre, max(cuit) AS cuit, "
+            "array_agg(DISTINCT anio ORDER BY anio) AS anios, max(anio) AS ultimo "
+            f"FROM {TABLA} WHERE {condicion} GROUP BY fuente, {_PERSONA} "
+            "ORDER BY max(anio) DESC LIMIT 8",
+            params,
+        )
+        titulo = f'Evolución DDJJ: "{persona}"'
+        if not personas:
+            resultado = self._resultado(titulo, [], fuente=fuente)
+            resultado.metadata["cobertura"] = self.describir_cobertura(await self.cobertura())
+            return resultado
+        if len(personas) > 1:
+            records = [
+                {
+                    "fuente": _NOMBRE_FUENTE.get(p["fuente"], p["fuente"]),
+                    "nombre": p["nombre"],
+                    "cuit": p["cuit"] or "",
+                    "anios": list(p["anios"]),
+                }
+                for p in personas
+            ]
+            return self._resultado(
+                titulo,
+                records,
+                fuente=fuente,
+                descripcion=(
+                    f"El nombre coincide con {len(personas)} personas: pedí la evolución de una "
+                    "con su CUIT o su nombre completo."
+                ),
+                varias_personas=True,
+            )
+        elegida = personas[0]
+        filas = await self._filas(
+            f"SELECT DISTINCT ON (anio) * FROM {TABLA} "
+            f"WHERE fuente = :f AND {_PERSONA} = :p "
+            f"ORDER BY anio, {_PRIORIDAD_TIPO}, rectificativa DESC NULLS LAST, dj_id DESC",
+            {"f": elegida["fuente"], "p": elegida["persona"]},
+        )
+        records = []
+        for f in filas:
+            r = registro(f, compacto=True)
+            records.append(
+                {"anio": f["anio"], **{k: v for k, v in r.items() if k != "anio_declaracion"}}
+            )
+        return self._resultado(
+            f"Evolución patrimonial declarada: {elegida['nombre']}",
+            records,
+            fuente=elegida["fuente"],
+            descripcion=(
+                "Lo declarado cada año (una declaración por año, la anual si hubo varias). En "
+                "una inicial lo declarado es al inicio; en las demás, al cierre. Los montos son "
+                "nominales, sin ajustar por inflación."
+            ),
         )

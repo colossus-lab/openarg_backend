@@ -205,6 +205,7 @@ def create_celery() -> Celery:
         "openarg.check_series_freshness": {"queue": "ingest"},
         "openarg.ingest_ddjj_oa": {"queue": "ingest"},
         "openarg.ingest_ddjj_caba": {"queue": "ingest"},
+        "openarg.retirar_ddjj_genericas": {"queue": "ingest"},
         "openarg.run_pipeline": {"queue": "scraper"},
         "openarg.scrape_mapa_estado": {"queue": "scraper"},
         "openarg.scrape_gobernadores": {"queue": "scraper"},

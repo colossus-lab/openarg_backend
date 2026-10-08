@@ -438,7 +438,7 @@ def _caba(tmp_path, anios: dict[int, list[str]]) -> list:
 
 
 def _filas_caba(anio: int, base: int, n: int) -> list[str]:
-    # n declaraciones de $1.000.000 y una imposible (10.000 veces la mediana).
+    # n declaraciones de $1.000.000 y una imposible (más de 1.000 veces la mediana).
     filas = [
         f"{base + i},{anio},Nombre {i},APELLIDO,1,Director/A General,0,1000000,0,0,0,0,0,0,{anio}-03-01"
         for i in range(n)

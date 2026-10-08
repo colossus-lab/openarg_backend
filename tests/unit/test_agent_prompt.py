@@ -542,7 +542,7 @@ def test_quienes_de_un_grupo_el_prompt_y_declaraciones_juradas_dicen_lo_mismo() 
     # personas, y no van.
     assert "usá `estadisticas` y dá el total, el promedio y la mediana, con su año" in desc
     assert "decí cuántas declaraciones quedaron afuera por inconsistencia" in desc
-    assert "que se puede buscar la DDJJ de un diputado por su nombre" in desc
+    assert "que se puede buscar la DDJJ de un funcionario por su nombre" in desc
     # La regla de la herramienta no se relaja.
     assert (
         "No califiques ninguna variación, patrimonio ni ingreso como sospechoso o llamativo ni "

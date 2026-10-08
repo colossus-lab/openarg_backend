@@ -34,6 +34,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import DataError, DBAPIError
 
 from app.application.catalog.physical_namer import RawPhysicalName, RawPhysicalNamer
+from app.application.ddjj.reemplazos import es_reemplazado, sql_sin_reemplazados
 from app.application.expander import MultiFileExpander
 from app.application.pipeline.parsers import (
     dedupe_column_names,
@@ -626,7 +627,7 @@ def _count_bulk_collect_remaining(engine, portal: str | None = None) -> dict[str
         "  SELECT 1 FROM raw.cached_datasets cd "
         "  WHERE cd.dataset_id = d.id "
         "    AND cd.status IN ('ready', 'permanently_failed')"
-        ")"
+        ")" + sql_sin_reemplazados("d")
     )
     # Sprint 24: aligned with the dispatcher SELECT — `eligible_individual`
     # now counts rows that PASS the per-(portal,title) cap (rn <= 10), and
@@ -6304,6 +6305,12 @@ def collect_dataset(self, dataset_id: str, force_heavy: bool = False, force_repa
         fmt = _detect_format_from_url(download_url, fmt)
         portal, source_id = row.portal, row.source_id
 
+        if es_reemplazado(portal, title):
+            # Lo carga `ddjj_tasks` en raw.cache_ddjj_*: por acá llegaba roto.
+            # Antes de `_ensure_cached_entry`, para no dejar una fila nueva.
+            logger.info("Dataset %s (%s, %s): lo carga ddjj_tasks", dataset_id, portal, title)
+            return {"skipped": "reemplazado_por_ddjj"}
+
         # MASTERPLAN Fase 1.5: route through the destination resolver so the
         # raw-layer feature flag controls where the table lands. When
         # `OPENARG_USE_RAW_LAYER` is unset/0 the resolver returns the legacy
@@ -8004,7 +8011,7 @@ def bulk_collect_all(self, portal: str | None = None, chain_depth: int = 0):
             bypass_clause = "    AND d2.portal <> ALL(:bypass_portals) "
             params["bypass_portals"] = list(bypass_burned_portals)
         query = query.replace("{bypass_clause}", bypass_clause)
-        query = query.replace("{portal_clause}", portal_clause)
+        query = query.replace("{portal_clause}", portal_clause + sql_sin_reemplazados("d"))
 
         with engine.connect() as conn:
             rows = conn.execute(text(query), params).fetchall()
@@ -8095,7 +8102,9 @@ def bulk_collect_all(self, portal: str | None = None, chain_depth: int = 0):
         if portal:
             large_portal_clause = "    AND d.portal = :portal "
             large_params["portal"] = portal
-        large_query = large_query.replace("{portal_clause}", large_portal_clause)
+        large_query = large_query.replace(
+            "{portal_clause}", large_portal_clause + sql_sin_reemplazados("d")
+        )
         with engine.connect() as conn:
             large_groups = conn.execute(text(large_query), large_params).fetchall()
 

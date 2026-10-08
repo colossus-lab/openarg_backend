@@ -178,7 +178,7 @@ Plan.steps (máx 5)
 | `query_argentina_datos` | ArgentinaDatosAdapter | API argentinadatos.com — dólar, riesgo país, cotizaciones |
 | `query_bcra` | BCRAAdapter | API BCRA — reservas, tasas, base monetaria |
 | `query_sandbox` | PgSandboxAdapter | SQL read-only sobre tablas cacheadas en PostgreSQL (presupuesto, senado, staff, etc.) |
-| `query_ddjj` | DDJJAdapter | Declaraciones juradas patrimoniales (195 diputados, JSON local) |
+| `query_ddjj` | DDJJAdapter | Declaraciones juradas patrimoniales (`raw.cache_ddjj_*`: Oficina Anticorrupción 2012+, CABA 2023+) |
 | `query_sesiones` | SesionesAdapter | Transcripciones de sesiones del Congreso |
 | `query_staff` | StaffAdapter | Empleados HCDN + Senado + PEN |
 | `query_georef` | GeorefAdapter | API Georef — normalización de direcciones y localidades |

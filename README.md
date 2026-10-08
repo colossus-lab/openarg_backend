@@ -115,7 +115,7 @@ Tools (`answers/tools/`, built by `build_tools`; a tool whose dependency is miss
 | `obtener_datos` | Sandbox (`consultas/`) | Read rows with period, filters and order (no SQL from the model) |
 | `calcular` | Sandbox (`consultas/agregar`) | Sum, count, average, min/max with grouping, filters and survey weights |
 | `cotizaciones` | DolarApi / ArgentinaDatos | Non-official dollar quotes (blue, MEP, CCL…) and country risk |
-| `declaraciones_juradas` | Static dataset (195 deputies' asset declarations) | Search, rankings, aggregate statistics |
+| `declaraciones_juradas` | `raw.cache_ddjj_*`: Oficina Anticorrupción (national officials, 2012 onwards) and City of Buenos Aires (2023 onwards) asset declarations | Search, year-by-year evolution, rankings and statistics filtered by year, branch, agency or position |
 | `sesiones` | Chamber of Deputies session transcripts (vector search) | What was said about a topic, attributed to the speaker |
 | `personal_legislativo` | HCDN payroll (database) | Staff per legislator, changes, totals |
 | `ubicar_lugar` | Georef | Normalize a place name (never cited as a source) |
@@ -169,7 +169,7 @@ Results are then collapsed so that copies of the same file show once (`catalog/c
 | BCRA | Live API: monetary statistics v4.0 and exchange statistics v1.0; daily snapshot with history in `raw.cache_bcra_cotizaciones` | Agent, legacy, marts |
 | DolarApi / ArgentinaDatos | Live API | Agent (`cotizaciones`), legacy |
 | Georef (apis.datos.gob.ar/georef) | Live API | Agent, legacy |
-| Asset declarations (Oficina Anticorrupción) | Static dataset `infrastructure/data/ddjj_dataset.json` (195 records) | Agent, legacy |
+| Asset declarations (Oficina Anticorrupción, CABA) | `raw.cache_ddjj_declaraciones`, `_bienes`, `_deudas`, loaded weekly by `ingest_ddjj_oa` / `ingest_ddjj_caba` (`ddjj_tasks.py`) | Agent, legacy, data mode |
 | Chamber of Deputies sessions | Transcript chunks, vector search | Agent, legacy |
 | HCDN payroll | Database tables refreshed weekly | Agent, legacy |
 | Open-data portals (CKAN, DKAN and others) | Scraped daily into `datasets`, downloaded into `raw.*` tables, embedded into `dataset_chunks` | Catalogue search, sandbox, MCP data mode |
