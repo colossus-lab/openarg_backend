@@ -2,35 +2,15 @@ from __future__ import annotations
 
 import hashlib
 import logging
-import os
 import secrets
 
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
+from app.presentation.http.middleware.public_paths import PUBLIC_PATHS, SERVICE_PREFIXES
+
 logger = logging.getLogger(__name__)
-
-# /ask, /fuentes y /catalogo/* hacen su propia auth con la clave `oarg_sk_` del usuario.
-_ALWAYS_PUBLIC = frozenset(
-    {
-        "/health",
-        "/health/ready",
-        "/api/v1/ask",
-        "/api/v1/fuentes",
-        "/api/v1/catalogo/buscar",
-        "/api/v1/catalogo/tabla",
-        "/api/v1/catalogo/datos",
-    }
-)
-_SERVICE_PREFIXES = (
-    "/api/v1/data/",  # Own auth via Bearer service token
-    "/api/v1/admin/",  # Own auth via X-Admin-Key (verify_admin_key dependency)
-)
-_DEV_PUBLIC = frozenset({"/docs", "/openapi.json", "/redoc"})
-
-_env = os.getenv("APP_ENV", "local").lower()
-_PUBLIC_PATHS = _ALWAYS_PUBLIC | _DEV_PUBLIC if _env != "prod" else _ALWAYS_PUBLIC
 
 
 class APIKeyMiddleware(BaseHTTPMiddleware):
@@ -45,7 +25,7 @@ class APIKeyMiddleware(BaseHTTPMiddleware):
             return await call_next(request)
 
         path = request.url.path
-        if path in _PUBLIC_PATHS or any(path.startswith(p) for p in _SERVICE_PREFIXES):
+        if path in PUBLIC_PATHS or any(path.startswith(p) for p in SERVICE_PREFIXES):
             return await call_next(request)
 
         provided_key = request.headers.get("X-API-Key", "")
