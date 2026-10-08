@@ -54,14 +54,9 @@ Upsert a user from Google OAuth (NextAuth frontend). Creates the user if they do
 }
 ```
 
-### `GET /api/v1/users/me?email={email}`
+### `GET /api/v1/users/me`
 
-Get user by email.
-
-**Query Parameters:**
-| Param | Type | Required | Description |
-|-------|------|----------|-------------|
-| `email` | string | yes | User email address |
+Get the current user. The email comes from the validated Google ID token (`Authorization: Bearer`), not from a query parameter; without it, `401`.
 
 **Response:** `200 OK` — Same shape as sync response.
 
@@ -214,119 +209,37 @@ Get messages for a conversation (ordered by `created_at ASC`).
 
 ---
 
-## Query
+## Query (web chat)
 
-### `POST /api/v1/query/`
-
-Submit a query for asynchronous analysis via Celery workers.
-
-**Request Body:**
-```json
-{
-  "question": "Cuanto gasta el gobierno en educacion?",
-  "user_id": "optional-session-id"
-}
-```
-
-**Response:** `200 OK`
-```json
-{
-  "query_id": "550e8400-...",
-  "status": "pending",
-  "message": "Query submitted. Use GET /query/{query_id} to check status."
-}
-```
-
-### `GET /api/v1/query/{query_id}`
-
-Check status and results of a submitted query.
-
-**Response:** `200 OK`
-```json
-{
-  "query_id": "550e8400-...",
-  "status": "completed",
-  "question": "Cuanto gasta el gobierno en educacion?",
-  "analysis_result": "Segun los datos del presupuesto...",
-  "sources": [
-    { "title": "Presupuesto Nacional 2025", "portal": "datos_gob_ar", "score": 0.87 }
-  ],
-  "tokens_used": 1500,
-  "duration_ms": 4200
-}
-```
-
-**Possible statuses:** `pending`, `planning`, `collecting`, `analyzing`, `completed`, `error`, `not_found`
-
-### `POST /api/v1/query/quick`
-
-Synchronous query — searches datasets, optionally fetches real cached data, and returns an LLM-generated answer immediately. Results are cached in Redis for 1 hour.
-
-**Rate limit:** 15 requests/minute
-
-**Request Body:**
-```json
-{
-  "question": "Cuanto gasta el gobierno en educacion?",
-  "user_id": "optional-session-id"
-}
-```
-
-**Response:** `200 OK`
-```json
-{
-  "answer": "Segun los datos del presupuesto nacional...",
-  "sources": [
-    { "title": "Presupuesto 2025", "portal": "datos_gob_ar", "score": 0.87, "has_data": true }
-  ],
-  "tokens_used": 1200,
-  "has_real_data": true,
-  "cached": false
-}
-```
-
-### `DELETE /api/v1/query/cache/{question_hash}`
-
-Invalidate a cached query result.
-
-**Response:** `200 OK`
-```json
-{ "status": "deleted", "key": "openarg:query:abc123..." }
-```
-
-### `WS /api/v1/query/ws/stream`
-
-WebSocket endpoint for streaming query responses (legacy).
-
-**Client sends:**
-```json
-{ "question": "Cuanto gasta el gobierno en educacion?" }
-```
-
-**Server streams:**
-```json
-{ "type": "status", "content": "Buscando datasets..." }
-{ "type": "status", "content": "Analizando..." }
-{ "type": "chunk", "content": "Segun los datos..." }
-{ "type": "chunk", "content": " del presupuesto..." }
-{ "type": "complete", "sources": [...] }
-```
+The legacy `query_router` (`POST /api/v1/query/`, `GET /api/v1/query/{query_id}`,
+`POST /api/v1/query/quick`, `DELETE /api/v1/query/cache/{question_hash}`,
+`WS /api/v1/query/ws/stream`) was removed on 2026-05-05 (`root_router.py`). The chat
+uses the two endpoints below. Both answer with the engine selected by
+`ANSWERS_ENGINE` (`legacy` LangGraph graph or `agent`), the same one `/api/v1/ask` uses.
 
 ### `POST /api/v1/query/smart`
 
-LangGraph pipeline endpoint. Executes the full multi-agent query pipeline: classify, cache, plan, execute, analyze, and finalize.
+**Auth:** `X-API-Key` (shared backend key) and, where `GOOGLE_OAUTH_CLIENT_ID` is set,
+the user's Google ID token in `Authorization: Bearer`. The user's email comes from the
+token; a `user_email` in the body that disagrees with it is rejected (`403 AUTH_SPOOF`).
 
-**Rate limit:** 15 requests/minute
+**Rate limit:** 10 requests/minute and 50/day. The web chat's monthly quota also applies
+(`application/web_quota.py`).
 
-**Request Body:**
+**Request Body** (`extra="forbid"`: unknown fields get `422`):
 ```json
 {
   "question": "Cuanto gasta el gobierno en educacion?",
-  "user_email": "user@example.com",
+  "user_email": "optional, must match the token",
   "conversation_id": "optional-uuid",
+  "mode": "normal",
   "policy_mode": false
 }
 ```
+
+`mode` is `"normal"` or `"deep"`; `policy_mode: true` is the old way of asking for
+`"deep"`. Only the legacy engine has a deep mode. `history` is accepted for old clients
+and ignored: history is loaded from the database through `conversation_id`.
 
 **Response:** `200 OK`
 ```json
@@ -336,37 +249,46 @@ LangGraph pipeline endpoint. Executes the full multi-agent query pipeline: class
     { "name": "Presupuesto 2025", "url": "https://...", "portal": "datos_gob_ar", "accessed_at": "..." }
   ],
   "chart_data": [...],
+  "map_data": null,
   "tokens_used": 1200,
-  "confidence": 0.85,
   "citations": [...],
   "documents": [...],
-  "warnings": []
+  "warnings": [],
+  "quota": { ... }
 }
 ```
 
+`confidence` is no longer returned.
+
 ### `WS /api/v1/query/ws/smart`
 
-LangGraph pipeline via WebSocket. Streams real-time progress events as the pipeline executes.
+Streams the answer. The service key goes in the `X-API-Key` header of the handshake
+(the `?api_key=` query parameter still works but is deprecated); if the handshake has
+no valid key it can come as `api_key` in the first message.
 
 **Client sends (after connecting):**
 ```json
 {
   "question": "Cuanto gasta el gobierno en educacion?",
   "conversation_id": "optional-uuid",
-  "policy_mode": false
+  "mode": "normal",
+  "id_token": "optional Google ID token (required to use conversation_id)",
+  "user_email": "optional"
 }
 ```
 
 **Server streams:**
 ```json
-{ "type": "status", "step": "classifying" }
-{ "type": "status", "step": "planning" }
-{ "type": "status", "step": "planned", "intent": "economic_data", "steps_count": 2 }
-{ "type": "status", "step": "searching" }
-{ "type": "status", "step": "generating" }
+{ "type": "status", "step": "searching", "detail": "..." }
 { "type": "chunk", "content": "Segun los datos..." }
-{ "type": "complete", "answer": "...", "sources": [...], "chart_data": [...], "confidence": 0.85, "citations": [...] }
+{ "type": "clear_answer" }
+{ "type": "clarification", "question": "...", "options": ["...", "..."] }
+{ "type": "complete", "answer": "...", "sources": [...], "chart_data": [...], "map_data": null, "citations": [...], "documents": [...], "warnings": [], "tokens_used": 1200 }
+{ "type": "error", "message": "..." }
 ```
+
+`clear_answer` means "discard what was streamed so far": the final text replaces it
+(stale-data notice added at the top, or the agent's corrective round).
 
 ---
 
@@ -411,18 +333,10 @@ Get dataset counts per portal.
 ]
 ```
 
-### `POST /api/v1/datasets/scrape/{portal}`
+### `GET /api/v1/datasets/{dataset_id}/download`
 
-Trigger a catalog scrape for a portal.
-
-**Rate limit:** 2 requests/hour
-
-**Valid portals:** `datos_gob_ar`, `caba`
-
-**Response:** `200 OK`
-```json
-{ "task_id": "celery-task-id", "portal": "datos_gob_ar", "status": "scraping_started" }
-```
+Download the original file of a dataset: a presigned S3 URL when the file is in S3,
+or a redirect to the portal otherwise.
 
 ---
 
@@ -613,13 +527,35 @@ consumed a question.
 
 ---
 
+## Public API — data mode (no LLM)
+
+Same `Authorization: Bearer oarg_sk_…` key as `/ask`. These endpoints do not run a
+model and do not consume questions: each request counts against the monthly
+**data requests** (200, Fundadores 2,000) plus a limit of 30 per minute. They are what
+the public MCP's `listar_fuentes`, `buscar_datasets`, `describir_tabla`,
+`obtener_datos` and `agregar_datos` tools call (`mcp_publico/server.py`). No SQL comes
+from the client: queries are built in code from existing tables and columns, with
+bound parameters (`application/consultas/`, `application/public_catalog.py`).
+
+| Endpoint | Purpose |
+|----------|---------|
+| `GET /api/v1/fuentes` | Portals covered and dataset counts |
+| `GET /api/v1/catalogo/buscar?q=…&portal=…&limite=…` | Semantic catalogue search (`limite` 1–25), one entry per file |
+| `GET /api/v1/catalogo/tabla` | Describe a table: columns, types, rows, sample |
+| `POST /api/v1/catalogo/datos` | Read rows with columns, period, filters and order |
+| `POST /api/v1/catalogo/agregar` | Sum, count, average, min/max with grouping and filters |
+
+See `catalogo_router.py` for the request and response models.
+
+---
+
 ## API Key Management
 
 ### `POST /api/v1/developers/keys`
 
 Create a new API key. Returns the full key **once** — save it immediately. If a key already exists, it is automatically revoked and replaced.
 
-**Auth:** `X-API-Key` (shared backend key) + `X-User-Email` header
+**Auth:** `X-API-Key` (shared backend key) + the user's Google ID token (`Authorization: Bearer`). Limit: 5 keys created per hour per user.
 
 **Request:**
 ```json
@@ -634,7 +570,7 @@ Create a new API key. Returns the full key **once** — save it immediately. If 
   "name": "My API Key",
   "key_prefix": "oarg_sk_a1b2c3d4",
   "plan": "free",
-  "limits": {"per_min": 2, "per_day": 5},
+  "limits": {"per_min": 2},
   "warning": "Save this key now. You will not be able to see it again."
 }
 ```

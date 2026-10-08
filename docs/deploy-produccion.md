@@ -33,7 +33,7 @@ borra nada, y hace que el rollback no dependa del registry.
 ```bash
 T=rollback-$(date +%Y%m%d)
 B=ghcr.io/colossus-lab/openarg
-for c in $(docker ps --format '{{.Names}}' | grep -E 'openarg_(backend|beat|worker|frontend)'); do
+for c in $(docker ps --format '{{.Names}}' | grep -E 'openarg_(backend|beat|worker|frontend|mcp)'); do
   img=$(docker inspect -f '{{.Image}}' "$c")
   nombre=$(docker inspect -f '{{.Config.Image}}' "$c" | sed 's|.*/||; s|:.*||')
   docker tag "$img" "$B/$nombre:$T"
@@ -137,7 +137,7 @@ Sin migraciones pendientes es sólo de imágenes:
 ```bash
 T=rollback-<fecha>
 for s in api beat worker-collector worker-ingest worker-embedding \
-         worker-analyst worker-scraper worker-transparency worker-s3 openarg-frontend; do
+         worker-analyst worker-scraper worker-transparency worker-s3 openarg-mcp openarg-frontend; do
   docker tag ghcr.io/colossus-lab/openarg/$s:$T ghcr.io/colossus-lab/openarg/$s:latest
 done
 docker compose up -d --no-deps $SVC
