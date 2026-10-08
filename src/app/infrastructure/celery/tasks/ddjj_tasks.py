@@ -44,6 +44,7 @@ fecha de modificación), no se baja nada.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -51,7 +52,7 @@ import tempfile
 from collections import Counter
 from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from typing import Any
 
 import httpx
@@ -59,6 +60,7 @@ from celery.exceptions import SoftTimeLimitExceeded
 from sqlalchemy import text
 from sqlalchemy.engine import Connection, Engine
 
+from app.application.ddjj import caba
 from app.application.ddjj import oficina_anticorrupcion as oa
 from app.infrastructure.celery.app import celery_app
 from app.infrastructure.celery.tasks._db import get_sync_engine, register_via_b_table
@@ -122,7 +124,9 @@ _DDL: dict[str, str] = {
         detalle_deudas_cierre numeric,
         corregido_x10 text[],
         inconsistente boolean NOT NULL DEFAULT false,
-        ingresos_inconsistentes boolean NOT NULL DEFAULT false
+        ingresos_inconsistentes boolean NOT NULL DEFAULT false,
+        bienes_por_tipo jsonb,
+        fecha_presentacion date
     """,
     TABLA_BIENES: """
         dj_id bigint NOT NULL,
@@ -155,7 +159,10 @@ _INDICES: dict[str, tuple[tuple[str, str], ...]] = {
     TABLA_DEUDAS: (("dj_id_idx", "(dj_id)"),),
 }
 
-FUENTES_LEGIBLES = {oa.FUENTE: "Oficina Anticorrupción"}
+FUENTES_LEGIBLES = {
+    oa.FUENTE: "Oficina Anticorrupción",
+    caba.FUENTE: "Ciudad de Buenos Aires",
+}
 PODERES_LEGIBLES = {
     "ejecutivo": "Poder Ejecutivo",
     "legislativo": "Poder Legislativo (diputados y senadores)",
@@ -189,8 +196,10 @@ class Recurso:
         return {"id": self.id, "url": self.url, "modificado": self.modificado}
 
 
-def consultar_paquete(client: httpx.Client, paquete: str = PAQUETE_OA) -> list[Recurso]:
-    r = client.get(API_PAQUETE, params={"id": paquete})
+def consultar_paquete(
+    client: httpx.Client, paquete: str = PAQUETE_OA, api: str = API_PAQUETE
+) -> list[Recurso]:
+    r = client.get(api, params={"id": paquete})
     r.raise_for_status()
     cuerpo = r.json()
     if not cuerpo.get("success"):
@@ -635,6 +644,7 @@ class FichaTabla:
     filas: int
     tags: str
     bytes: int
+    organizacion: str = "Oficina Anticorrupción"
 
     @property
     def identidad(self) -> str:
@@ -674,67 +684,87 @@ def _columnas_de(conn: Connection, tabla: str) -> tuple[str, ...]:
     )
 
 
-def fichas(conn: Connection) -> list[FichaTabla]:
-    """Título y descripción de las tres tablas, armados con lo que tiene la carga nueva."""
+_LICENCIAS = {
+    oa.FUENTE: f"Oficina Anticorrupción, datos.jus.gob.ar, dataset {PAQUETE_OA} (CC-BY 4.0)",
+    caba.FUENTE: (
+        "Ciudad de Buenos Aires, Secretaría Legal y Técnica, data.buenosaires.gob.ar, "
+        f"dataset {caba.PAQUETE} (CC-BY 2.5 AR)"
+    ),
+}
+_NOTAS_FUENTE = {
+    caba.FUENTE: (
+        "Las de la Ciudad de Buenos Aires traen el total de bienes por tipo (bienes_por_tipo) "
+        "sin deudas, así que no tienen patrimonio neto; el año es el de presentación y no "
+        "traen CUIT, organismo ni tipo de declaración."
+    ),
+}
+
+
+def ficha_declaraciones(conn: Connection) -> FichaTabla:
+    """Título y descripción de `cache_ddjj_declaraciones`, con lo que tiene la carga nueva."""
     decl = f"{TABLA_DECLARACIONES}__nueva"
     por_fuente = conn.execute(
         text(f'SELECT fuente, min(anio), max(anio), count(*) FROM raw."{decl}" GROUP BY fuente')
     ).all()
+    fuentes = sorted(str(f) for f, *_ in por_fuente)
     poderes = [
         r[0]
         for r in conn.execute(
             text(f"SELECT DISTINCT poder FROM raw.\"{decl}\" WHERE poder <> 'sin_dato'")
         )
     ]
-    anios_bienes = [
-        r[0]
-        for r in conn.execute(
-            text(
-                f'SELECT DISTINCT d.anio FROM raw."{decl}" d '
-                f"WHERE d.detalle_bienes_inicio IS NOT NULL OR d.detalle_bienes_cierre IS NOT NULL"
-            )
-        )
-    ]
-    anios_deudas = [
-        r[0]
-        for r in conn.execute(
-            text(
-                f'SELECT DISTINCT d.anio FROM raw."{decl}" d '
-                f"WHERE d.detalle_deudas_inicio IS NOT NULL OR d.detalle_deudas_cierre IS NOT NULL"
-            )
-        )
-    ]
-    total = sum(int(n) for *_, n in por_fuente)
     cobertura = "; ".join(
         f"{FUENTES_LEGIBLES.get(f, f)}, años {lo}–{hi} ({_miles(int(n))} declaraciones)"
         for f, lo, hi, n in sorted(por_fuente)
     )
     alcance = ", ".join(PODERES_LEGIBLES[p] for p in PODERES_LEGIBLES if p in poderes)
-    licencia = (
-        f"Fuente: Oficina Anticorrupción, datos.jus.gob.ar, dataset {PAQUETE_OA} (CC-BY 4.0)."
+    partes = [
+        "Una fila por declaración jurada patrimonial: funcionario, CUIT, organismo, cargo, "
+        "poder del Estado, año, tipo (inicial, anual o baja), bienes y deudas al inicio y al "
+        "cierre, patrimonio declarado, variación patrimonial, ingresos y gastos personales.",
+        f"Cobertura: {cobertura}.",
+        f"Incluye {alcance}. No incluye el grupo familiar.",
+        "Los totales que la Oficina Anticorrupción publicó multiplicados por 10 se toman de "
+        "un corte sano o se corrigen contra el detalle (columna corregido_x10).",
+        *(_NOTAS_FUENTE[f] for f in fuentes if f in _NOTAS_FUENTE),
+        f"Fuentes: {'; '.join(_LICENCIAS.get(f, f) for f in fuentes)}.",
+    ]
+    tags = [
+        "declaraciones juradas,ddjj,patrimonio,funcionarios,bienes,deudas,"
+        "oficina anticorrupcion,transparencia,diputados,senadores"
+    ]
+    if caba.FUENTE in fuentes:
+        tags.append("ciudad de buenos aires,caba")
+    return FichaTabla(
+        tabla=TABLA_DECLARACIONES,
+        source_id="ddjj-declaraciones",
+        titulo="Declaraciones juradas patrimoniales de funcionarios públicos",
+        descripcion=" ".join(partes),
+        columnas=_columnas_de(conn, decl),
+        filas=sum(int(n) for *_, n in por_fuente),
+        tags=",".join(tags),
+        bytes=_bytes(conn, decl),
+        organizacion=" y ".join(FUENTES_LEGIBLES.get(f, f) for f in fuentes),
     )
+
+
+def fichas_detalle(conn: Connection) -> list[FichaTabla]:
+    """Título y descripción de `cache_ddjj_bienes` y `cache_ddjj_deudas` (sólo la OA)."""
+    decl = f"{TABLA_DECLARACIONES}__nueva"
+
+    def anios(tipo: str) -> list[int]:
+        return [
+            r[0]
+            for r in conn.execute(
+                text(
+                    f'SELECT DISTINCT anio FROM raw."{decl}" '
+                    f"WHERE detalle_{tipo}_inicio IS NOT NULL OR detalle_{tipo}_cierre IS NOT NULL"
+                )
+            )
+        ]
+
+    licencia = f"Fuente: {_LICENCIAS[oa.FUENTE]}."
     return [
-        FichaTabla(
-            tabla=TABLA_DECLARACIONES,
-            source_id="ddjj-declaraciones",
-            titulo="Declaraciones juradas patrimoniales de funcionarios públicos",
-            descripcion=(
-                "Una fila por declaración jurada patrimonial integral: funcionario, CUIT, "
-                "organismo, cargo, poder del Estado, año, tipo (inicial, anual o baja), bienes "
-                "y deudas al inicio y al cierre, patrimonio declarado, variación patrimonial, "
-                f"ingresos y gastos personales. Cobertura: {cobertura}. Incluye {alcance}. "
-                "No incluye el grupo familiar. Los totales que la Oficina publicó "
-                "multiplicados por 10 se toman de un corte sano o se corrigen contra el "
-                f"detalle (columna corregido_x10). {licencia}"
-            ),
-            columnas=_columnas_de(conn, decl),
-            filas=total,
-            tags=(
-                "declaraciones juradas,ddjj,patrimonio,funcionarios,bienes,deudas,"
-                "oficina anticorrupcion,transparencia,diputados,senadores"
-            ),
-            bytes=_bytes(conn, decl),
-        ),
         FichaTabla(
             tabla=TABLA_BIENES,
             source_id="ddjj-bienes",
@@ -742,9 +772,9 @@ def fichas(conn: Connection) -> list[FichaTabla]:
             descripcion=(
                 "Detalle de los bienes de cada declaración jurada patrimonial de la Oficina "
                 "Anticorrupción (inmuebles, automotores, depósitos, acciones, títulos, dinero "
-                f"en efectivo, bienes del hogar), al inicio y al cierre. Años {_rango(anios_bienes)}"
-                " (los de 2016 y 2017 se publicaron sin importe). Se une a "
-                f"{TABLA_DECLARACIONES} por dj_id. {licencia}"
+                "en efectivo, bienes del hogar), al inicio y al cierre. "
+                f"Años {_rango(anios('bienes'))} (los de 2016 y 2017 se publicaron sin "
+                f"importe). Se une a {TABLA_DECLARACIONES} por dj_id. {licencia}"
             ),
             columnas=_columnas_de(conn, f"{TABLA_BIENES}__nueva"),
             filas=_cantidad(conn, f"{TABLA_BIENES}__nueva") or 0,
@@ -757,9 +787,9 @@ def fichas(conn: Connection) -> list[FichaTabla]:
             titulo="Deudas declaradas en las declaraciones juradas de funcionarios públicos",
             descripcion=(
                 "Detalle de las deudas de cada declaración jurada patrimonial de la Oficina "
-                "Anticorrupción (hipotecarias, prendarias, comunes), con acreedor, al inicio y al "
-                f"cierre. Años {_rango(anios_deudas)}. Se une a {TABLA_DECLARACIONES} por dj_id. "
-                f"{licencia}"
+                "Anticorrupción (hipotecarias, prendarias, comunes), con acreedor, al inicio y "
+                f"al cierre. Años {_rango(anios('deudas'))}. Se une a {TABLA_DECLARACIONES} "
+                f"por dj_id. {licencia}"
             ),
             columnas=_columnas_de(conn, f"{TABLA_DEUDAS}__nueva"),
             filas=_cantidad(conn, f"{TABLA_DEUDAS}__nueva") or 0,
@@ -802,7 +832,7 @@ def _asegurar_dataset(engine: Engine, ficha: FichaTabla) -> tuple[str, bool]:
                 "sid": ficha.source_id,
                 "title": ficha.titulo,
                 "desc": ficha.descripcion,
-                "org": FUENTES_LEGIBLES[oa.FUENTE],
+                "org": ficha.organizacion,
                 "portal": PORTAL,
                 "url": oa.URL_DATASET,
                 "cols": json.dumps(list(ficha.columnas)),
@@ -866,8 +896,9 @@ def completar_metadatos(
                 text(
                     """
                     UPDATE datasets SET
-                        title = :title, description = :desc, url = :url, columns = :cols,
-                        tags = :tags, row_count = :rows, last_updated_at = :now, updated_at = :now
+                        title = :title, description = :desc, organization = :org, url = :url,
+                        columns = :cols, tags = :tags, row_count = :rows,
+                        last_updated_at = :now, updated_at = :now
                     WHERE id = CAST(:did AS uuid)
                     """
                 ),
@@ -875,6 +906,7 @@ def completar_metadatos(
                     "did": dataset_id,
                     "title": ficha.titulo,
                     "desc": ficha.descripcion,
+                    "org": ficha.organizacion,
                     "url": oa.URL_DATASET,
                     "cols": json.dumps(list(ficha.columnas)),
                     "tags": ficha.tags,
@@ -973,10 +1005,12 @@ def anotar_carga(
         logger.warning("DDJJ: no se pudo anotar la carga %s", estado, exc_info=True)
 
 
-def tablas_en_orden(engine: Engine) -> bool:
-    """Las tres tablas existen y están registradas: si no, hay que escribir."""
+def tablas_en_orden(
+    engine: Engine, tablas: tuple[str, ...] = (TABLA_DECLARACIONES, TABLA_BIENES, TABLA_DEUDAS)
+) -> bool:
+    """Las tablas existen y están registradas: si no, hay que escribir."""
     with engine.connect() as conn:
-        for tabla in (TABLA_DECLARACIONES, TABLA_BIENES, TABLA_DEUDAS):
+        for tabla in tablas:
             if not _existe(conn, tabla):
                 return False
             registrada = conn.execute(
@@ -1005,6 +1039,28 @@ def _alertar(engine: Engine, titulo: str, detalle: str, clave: str) -> None:
 
 
 # ── la carga ─────────────────────────────────────────────────────────────────
+
+
+def _publicar(
+    engine: Engine, conn: Connection, lista: list[FichaTabla]
+) -> list[tuple[FichaTabla, str, bool]]:
+    """WS0 y reemplazo de las tablas de `lista`, dentro de la transacción de la carga."""
+    publicadas: list[tuple[FichaTabla, str, bool]] = []
+    for ficha in lista:
+        dataset_id, cambio = _asegurar_dataset(engine, ficha)
+        ws0 = veredicto_ws0(engine, dataset_id=dataset_id, ficha=ficha)
+        if ws0:
+            raise _Rechazo(f"WS0 {ficha.tabla}: {ws0}")
+        publicadas.append((ficha, dataset_id, cambio))
+    conn.execute(text("SET LOCAL lock_timeout = '15s'"))
+    for ficha, _, _ in publicadas:
+        reemplazar(conn, ficha.tabla)
+    return publicadas
+
+
+def _completar(engine: Engine, publicadas: list[tuple[FichaTabla, str, bool]]) -> None:
+    for ficha, dataset_id, cambio in publicadas:
+        completar_metadatos(engine, dataset_id=dataset_id, ficha=ficha, reembeber=cambio)
 
 
 def cargar_oa(
@@ -1060,21 +1116,9 @@ def cargar_oa(
         if rechazo:
             raise _Rechazo(rechazo)
 
-        lista_fichas = fichas(conn)
-        ids: dict[str, tuple[str, bool]] = {}
-        for ficha in lista_fichas:
-            ids[ficha.tabla] = _asegurar_dataset(engine, ficha)
-            ws0 = veredicto_ws0(engine, dataset_id=ids[ficha.tabla][0], ficha=ficha)
-            if ws0:
-                raise _Rechazo(f"WS0 {ficha.tabla}: {ws0}")
+        publicadas = _publicar(engine, conn, [ficha_declaraciones(conn), *fichas_detalle(conn)])
 
-        conn.execute(text("SET LOCAL lock_timeout = '15s'"))
-        for tabla in (TABLA_DECLARACIONES, TABLA_BIENES, TABLA_DEUDAS):
-            reemplazar(conn, tabla)
-
-    for ficha in lista_fichas:
-        dataset_id, cambio = ids[ficha.tabla]
-        completar_metadatos(engine, dataset_id=dataset_id, ficha=ficha, reembeber=cambio)
+    _completar(engine, publicadas)
 
     return {
         "declaraciones": n_decl,
@@ -1087,6 +1131,198 @@ def cargar_oa(
         "filas_invalidas": dict(cuentas.invalidas),
         "filas_repetidas": dict(cuentas.repetidas),
     }
+
+
+# CABA no publica el detalle de los bienes, así que no hay contra qué cerrar un
+# total, y algunos son imposibles: una controladora de faltas con $21,5 billones en
+# inmuebles en 2025, cuando la mediana del año es $15 millones y la declaración
+# más grande de la OA en 2024 es de $614.000 millones. Se marca inconsistente lo
+# que pasa 10.000 veces la mediana de su año: 15 de las 9.135 declaraciones de
+# 2023-2026 (08-oct), todas desde los $150.000 millones. Queda afuera de rankings
+# y promedios, como en la OA.
+_VECES_MEDIANA_CABA = 10_000
+_SQL_INCONSISTENTES_CABA = """
+    UPDATE raw."{decl}__nueva" d SET inconsistente = true
+    FROM (
+        SELECT anio, percentile_cont(0.5) WITHIN GROUP (ORDER BY bienes) AS mediana
+        FROM raw."{decl}__nueva" WHERE fuente = :f AND bienes > 0 GROUP BY anio
+    ) m
+    WHERE d.fuente = :f AND d.anio = m.anio AND d.bienes > :veces * m.mediana
+"""
+
+
+def cargar_caba(
+    engine: Engine,
+    archivos: list[caba.ArchivoCaba],
+    *,
+    permitir_menos_filas: bool,
+) -> dict[str, Any]:
+    """Reemplaza las declaraciones de CABA en `cache_ddjj_declaraciones` (las de las
+    otras fuentes se copian tal cual). Lanza `_Rechazo` sin tocar nada."""
+    invalidas: Counter = Counter()
+    repetidas: Counter = Counter()
+    salteados: list[str] = []
+
+    def filas() -> Iterator[tuple]:
+        vistos: set[int] = set()
+        for archivo in archivos:
+            columnas, lector = caba.leer(archivo.ruta)
+            nombre = archivo.url.rsplit("/", 1)[-1]
+            if not caba.es_formato_ancho(columnas):
+                salteados.append(f"{nombre}: formato largo (campo/valor), queda para después")
+                continue
+            for crudo in lector:
+                fila = caba.fila_declaracion(crudo, archivo)
+                if fila is None:
+                    invalidas[nombre] += 1
+                    continue
+                if fila[1] in vistos:
+                    repetidas[nombre] += 1
+                    continue
+                vistos.add(fila[1])
+                yield fila
+
+    with engine.begin() as conn:
+        conn.execute(text("SELECT pg_advisory_xact_lock(:k)"), {"k": _LOCK_DDJJ})
+        conn.execute(text("SET LOCAL statement_timeout = '30min'"))
+        _crear_nueva(conn, TABLA_DECLARACIONES)
+        n = _copiar(conn, f'raw."{TABLA_DECLARACIONES}__nueva"', caba.COLUMNAS_DECLARACION, filas())
+        inconsistentes = int(
+            conn.execute(
+                text(_SQL_INCONSISTENTES_CABA.format(decl=TABLA_DECLARACIONES)),
+                {"f": caba.FUENTE, "veces": _VECES_MEDIANA_CABA},
+            ).rowcount
+            or 0
+        )
+        otras = _conservar_otras_fuentes(conn, caba.FUENTE)
+        _indexar(conn, TABLA_DECLARACIONES)
+        nuevas = _por_anio(conn, f"{TABLA_DECLARACIONES}__nueva", caba.FUENTE)
+        vivas = _por_anio(conn, TABLA_DECLARACIONES, caba.FUENTE)
+        rechazo = motivo_para_rechazar(
+            nuevas=nuevas,
+            vivas=vivas,
+            detalle_nuevo={},
+            detalle_vivo={},
+            permitir_menos_filas=permitir_menos_filas,
+        )
+        if rechazo:
+            raise _Rechazo(rechazo)
+        publicadas = _publicar(engine, conn, [ficha_declaraciones(conn)])
+
+    _completar(engine, publicadas)
+    return {
+        "declaraciones": n,
+        "declaraciones_por_anio": dict(sorted(nuevas.items())),
+        "inconsistentes": inconsistentes,
+        "otras_fuentes_conservadas": otras,
+        "salteados": salteados,
+        "filas_invalidas": dict(invalidas),
+        "filas_repetidas": dict(repetidas),
+    }
+
+
+def _fecha_iso(texto: str) -> date | None:
+    try:
+        return date.fromisoformat(texto[:10])
+    except ValueError:
+        return None
+
+
+def _sha256(ruta: str) -> str:
+    h = hashlib.sha256()
+    with open(ruta, "rb") as f:
+        for parte in iter(lambda: f.read(1 << 20), b""):
+            h.update(parte)
+    return h.hexdigest()
+
+
+def _ejecutar(
+    tarea: Any, engine: Engine, fuente: str, etiqueta: str, cuerpo: Any
+) -> dict[str, Any]:
+    """Corre una carga y deja anotado y alertado cómo terminó.
+
+    `cuerpo()` devuelve `(estado, manifiesto, resumen)`. Una carga escrita queda en
+    `ddjj_cargas` con su manifiesto, y es lo que la próxima corrida compara para
+    no volver a escribir. Un rechazo no reintenta (la fuente no va a cambiar
+    sola en dos minutos), una falla de red sí.
+    """
+    inicio = datetime.now(UTC)
+    try:
+        estado, mani, resumen = cuerpo()
+        if estado == "escrita":
+            anotar_carga(
+                engine,
+                fuente=fuente,
+                estado=estado,
+                inicio=inicio,
+                manifiesto_=mani,
+                resumen=resumen,
+            )
+            logger.info(
+                "%s: escrita %s", etiqueta, {k: v for k, v in resumen.items() if k != "plan"}
+            )
+        return {"estado": estado, **resumen}
+    except _Rechazo as exc:
+        logger.warning("%s: rechazada — %s", etiqueta, exc)
+        anotar_carga(
+            engine,
+            fuente=fuente,
+            estado="rechazada",
+            inicio=inicio,
+            manifiesto_=None,
+            resumen={},
+            detalle=str(exc),
+        )
+        _alertar(
+            engine,
+            f"{etiqueta}: la carga se negó a reemplazar",
+            str(exc),
+            f"{fuente}:rechazo:{exc}",
+        )
+        return {"estado": "rechazada", "detalle": str(exc)}
+    except _Falla as exc:
+        logger.error("%s: falló %s — %s", etiqueta, exc.motivo, exc.detalle)
+        anotar_carga(
+            engine,
+            fuente=fuente,
+            estado="fallida",
+            inicio=inicio,
+            manifiesto_=None,
+            resumen={},
+            detalle=str(exc),
+        )
+        _alertar(
+            engine, f"{etiqueta}: falló {exc.motivo}", exc.detalle, f"{fuente}:falla:{exc.motivo}"
+        )
+        raise
+    except SoftTimeLimitExceeded:
+        logger.error("%s: se pasó del tiempo", etiqueta)
+        raise
+    except httpx.HTTPError as exc:
+        logger.warning("%s: la fuente no respondió (%s); reintento", etiqueta, exc)
+        raise tarea.retry(exc=exc, countdown=600) from exc
+    except Exception as exc:
+        logger.exception("%s: falló", etiqueta)
+        anotar_carga(
+            engine,
+            fuente=fuente,
+            estado="fallida",
+            inicio=inicio,
+            manifiesto_=None,
+            resumen={},
+            detalle=f"{type(exc).__name__}: {exc}",
+        )
+        _alertar(
+            engine, f"{etiqueta}: falló la carga", str(exc), f"{fuente}:error:{type(exc).__name__}"
+        )
+        raise
+
+
+def _latir(engine: Engine, source_ids: Iterable[str]) -> None:
+    from app.application.quality.heartbeat import record_ingest
+
+    for source_id in source_ids:
+        record_ingest(engine, f"{PORTAL}::{source_id}")
 
 
 @celery_app.task(
@@ -1112,19 +1348,20 @@ def ingest_ddjj_oa(
       cargaría sin escribir nada.
     """
     engine = get_sync_engine()
-    inicio = datetime.now(UTC)
-    try:
+
+    def cuerpo() -> tuple[str, list[dict[str, str]] | None, dict[str, Any]]:
         with httpx.Client(timeout=_TIMEOUT_S, follow_redirects=True) as client:
             recursos = consultar_paquete(client)
             mani = manifiesto(recursos)
-            if not forzar and not dry_run and mani == ultima_carga(engine, oa.FUENTE):
-                if tablas_en_orden(engine):
-                    from app.application.quality.heartbeat import record_ingest
-
-                    for source_id in ("ddjj-declaraciones", "ddjj-bienes", "ddjj-deudas"):
-                        record_ingest(engine, f"{PORTAL}::{source_id}")
-                    logger.info("DDJJ OA: sin cambios en la fuente")
-                    return {"estado": "al_dia"}
+            if (
+                not forzar
+                and not dry_run
+                and mani == ultima_carga(engine, oa.FUENTE)
+                and tablas_en_orden(engine)
+            ):
+                _latir(engine, ("ddjj-declaraciones", "ddjj-bienes", "ddjj-deudas"))
+                logger.info("DDJJ OA: sin cambios en la fuente")
+                return "al_dia", mani, {}
             with tempfile.TemporaryDirectory(prefix="ddjj_oa_") as carpeta:
                 archivos, salteados = bajar_archivos(client, recursos, carpeta)
                 plan = armar_plan(archivos)
@@ -1132,7 +1369,7 @@ def ingest_ddjj_oa(
                 if not plan.principal:
                     raise _Falla("plan", "ningún archivo principal utilizable")
                 if dry_run:
-                    return {"estado": "simulada", **resumen}
+                    return "simulada", mani, resumen
                 resumen.update(cargar_oa(engine, plan, permitir_menos_filas=permitir_menos_filas))
         if resumen.get("corregidas_x10"):
             # Con la elección del corte no debería quedar ninguna: si quedan, la
@@ -1143,58 +1380,74 @@ def ingest_ddjj_oa(
                 f"{resumen['corregidas_x10']} declaraciones; el plan está en ddjj_cargas",
                 f"x10:{','.join(sorted(plan.como_dict()['principal']))}",
             )
-        anotar_carga(
-            engine,
-            fuente=oa.FUENTE,
-            estado="escrita",
-            inicio=inicio,
-            manifiesto_=mani,
-            resumen=resumen,
-        )
-        logger.info("DDJJ OA: escrita %s", {k: v for k, v in resumen.items() if k != "plan"})
-        return {"estado": "escrita", **resumen}
-    except _Rechazo as exc:
-        logger.warning("DDJJ OA: rechazada — %s", exc)
-        anotar_carga(
-            engine,
-            fuente=oa.FUENTE,
-            estado="rechazada",
-            inicio=inicio,
-            manifiesto_=None,
-            resumen={},
-            detalle=str(exc),
-        )
-        _alertar(engine, "DDJJ OA: la carga se negó a reemplazar", str(exc), f"rechazo:{exc}")
-        return {"estado": "rechazada", "detalle": str(exc)}
-    except _Falla as exc:
-        logger.error("DDJJ OA: falló %s — %s", exc.motivo, exc.detalle)
-        anotar_carga(
-            engine,
-            fuente=oa.FUENTE,
-            estado="fallida",
-            inicio=inicio,
-            manifiesto_=None,
-            resumen={},
-            detalle=str(exc),
-        )
-        _alertar(engine, f"DDJJ OA: falló {exc.motivo}", exc.detalle, f"falla:{exc.motivo}")
-        raise
-    except SoftTimeLimitExceeded:
-        logger.error("DDJJ OA: se pasó del tiempo")
-        raise
-    except httpx.HTTPError as exc:
-        logger.warning("DDJJ OA: la fuente no respondió (%s); reintento", exc)
-        raise self.retry(exc=exc, countdown=600) from exc
-    except Exception as exc:
-        logger.exception("DDJJ OA: falló")
-        anotar_carga(
-            engine,
-            fuente=oa.FUENTE,
-            estado="fallida",
-            inicio=inicio,
-            manifiesto_=None,
-            resumen={},
-            detalle=f"{type(exc).__name__}: {exc}",
-        )
-        _alertar(engine, "DDJJ OA: falló la carga", str(exc), f"error:{type(exc).__name__}")
-        raise
+        return "escrita", mani, resumen
+
+    return _ejecutar(self, engine, oa.FUENTE, "DDJJ OA", cuerpo)
+
+
+@celery_app.task(
+    name="openarg.ingest_ddjj_caba",
+    bind=True,
+    max_retries=2,
+    soft_time_limit=900,
+    time_limit=1000,
+)
+def ingest_ddjj_caba(
+    self,
+    *,
+    forzar: bool = False,
+    permitir_menos_filas: bool = False,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    """Carga las DDJJ de la Ciudad de Buenos Aires si algún CSV cambió.
+
+    Los CSV son chicos (~12 MB todos), así que siempre se bajan y se compara su
+    hash con el de la última carga escrita: el de 2026 crece durante el año y
+    CKAN no siempre actualiza la fecha del recurso. Mismos parámetros que
+    `ingest_ddjj_oa`.
+    """
+    engine = get_sync_engine()
+
+    def cuerpo() -> tuple[str, list[dict[str, str]] | None, dict[str, Any]]:
+        with httpx.Client(timeout=_TIMEOUT_S, follow_redirects=True) as client:
+            recursos = [
+                r
+                for r in consultar_paquete(client, caba.PAQUETE, caba.API_PAQUETE)
+                if r.formato == "csv" and caba.anio_de_url(r.url) is not None
+            ]
+            if not recursos:
+                raise _Falla("paquete", f"{caba.PAQUETE} no tiene CSV anuales")
+            recursos.sort(key=lambda r: caba.anio_de_url(r.url) or 0)
+            with tempfile.TemporaryDirectory(prefix="ddjj_caba_") as carpeta:
+                archivos: list[caba.ArchivoCaba] = []
+                mani: list[dict[str, str]] = []
+                for i, rec in enumerate(recursos):
+                    destino = os.path.join(carpeta, f"{i:02d}.csv")
+                    _bajar(client, rec.url, destino)
+                    archivos.append(
+                        caba.ArchivoCaba(
+                            ruta=destino, url=rec.url, corte=_fecha_iso(rec.modificado)
+                        )
+                    )
+                    mani.append({"url": rec.url, "sha256": _sha256(destino)})
+                if (
+                    not forzar
+                    and not dry_run
+                    and mani == ultima_carga(engine, caba.FUENTE)
+                    and tablas_en_orden(engine, (TABLA_DECLARACIONES,))
+                ):
+                    _latir(engine, ("ddjj-declaraciones",))
+                    logger.info("DDJJ CABA: sin cambios en la fuente")
+                    return "al_dia", mani, {}
+                if dry_run:
+                    formatos = {
+                        a.url.rsplit("/", 1)[-1]: (
+                            "ancho" if caba.es_formato_ancho(caba.leer(a.ruta)[0]) else "largo"
+                        )
+                        for a in archivos
+                    }
+                    return "simulada", mani, {"archivos": formatos}
+                resumen = cargar_caba(engine, archivos, permitir_menos_filas=permitir_menos_filas)
+        return "escrita", mani, resumen
+
+    return _ejecutar(self, engine, caba.FUENTE, "DDJJ CABA", cuerpo)

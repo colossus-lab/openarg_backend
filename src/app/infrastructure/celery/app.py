@@ -204,6 +204,7 @@ def create_celery() -> Celery:
         "openarg.ingest_series_tiempo": {"queue": "ingest"},
         "openarg.check_series_freshness": {"queue": "ingest"},
         "openarg.ingest_ddjj_oa": {"queue": "ingest"},
+        "openarg.ingest_ddjj_caba": {"queue": "ingest"},
         "openarg.run_pipeline": {"queue": "scraper"},
         "openarg.scrape_mapa_estado": {"queue": "scraper"},
         "openarg.scrape_gobernadores": {"queue": "scraper"},
@@ -903,6 +904,13 @@ def create_celery() -> Celery:
                 # última carga escrita, no baja nada.
                 "task": "openarg.ingest_ddjj_oa",
                 "schedule": crontab(day_of_week=1, hour=4, minute=30),
+                "options": {"queue": "ingest"},
+            },
+            "ingest-ddjj-caba": {
+                # Semanal, lunes 4:00 ART. El CSV del año en curso crece durante
+                # el año; si ningún CSV cambió (hash), no escribe nada.
+                "task": "openarg.ingest_ddjj_caba",
+                "schedule": crontab(day_of_week=1, hour=4, minute=0),
                 "options": {"queue": "ingest"},
             },
             "scrape-mapa-estado": {
