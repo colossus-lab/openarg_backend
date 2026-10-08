@@ -14,13 +14,15 @@ Las rutas salen del router real, no de una lista escrita acá: una ruta nueva en
 
 from __future__ import annotations
 
+import importlib
+import pkgutil
 from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
 from dishka import Provider, Scope, make_async_container
 from dishka.integrations.fastapi import setup_dishka
-from fastapi import FastAPI
+from fastapi import APIRouter, FastAPI
 from fastapi.routing import APIRoute
 from httpx import ASGITransport, AsyncClient
 from mcp_publico import core
@@ -38,6 +40,7 @@ from app.domain.ports.sandbox.sql_sandbox import ISQLSandbox
 from app.domain.ports.search.vector_search import IVectorSearch
 from app.infrastructure.auth import InvalidGoogleToken
 from app.infrastructure.persistence_sqla.provider import MainAsyncSession
+from app.presentation.http.controllers import public_api
 from app.presentation.http.controllers.root_router import create_root_router
 from app.presentation.http.middleware.auth_middleware import APIKeyMiddleware
 from app.presentation.http.middleware.google_jwt_middleware import GoogleJwtAuthMiddleware
@@ -59,13 +62,23 @@ _ROUTER_401 = "Invalid or unauthorized API key"
 
 
 def _public_api_routes() -> list[tuple[str, str]]:
-    package = "app.presentation.http.controllers.public_api."
-    return sorted(
-        (method, route.path)
-        for route in create_root_router().routes
-        if isinstance(route, APIRoute) and route.endpoint.__module__.startswith(package)
-        for method in route.methods
-    )
+    # Desde FastAPI 0.143 `create_root_router().routes` ya no es la lista plana
+    # de rutas sino un envoltorio por router incluido, así que se parte de los
+    # routers de `public_api/` y se le pide la ruta completa a la app con
+    # `url_path_for`, que es API pública y anda en todas las versiones.
+    root = create_root_router()
+    routes = []
+    for module_info in pkgutil.iter_modules(public_api.__path__):
+        module = importlib.import_module(f"{public_api.__name__}.{module_info.name}")
+        router = getattr(module, "router", None)
+        if not isinstance(router, APIRouter):
+            continue
+        for route in router.routes:
+            if isinstance(route, APIRoute):
+                path = root.url_path_for(route.name)
+                assert path.endswith(route.path), f"{route.name} apunta a otra ruta: {path}"
+                routes.extend((method, path) for method in route.methods)
+    return sorted(routes)
 
 
 PUBLIC_API_ROUTES = _public_api_routes()
