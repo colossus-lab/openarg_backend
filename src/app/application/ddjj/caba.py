@@ -39,8 +39,22 @@ from app.application.ddjj.oficina_anticorrupcion import parse_monto, poder_de
 FUENTE = "caba"
 JURISDICCION = "caba"
 PAQUETE = "declaraciones-juradas"
-API_PAQUETE = "https://data.buenosaires.gob.ar/api/3/action/package_show"
 URL_DATASET = "https://data.buenosaires.gob.ar/dataset/declaraciones-juradas"
+# Los CSV se bajan directo del CDN: la API de CKAN de la Ciudad está detrás de un
+# WAF que, desde los servidores de OpenArg, contesta "Request Rejected" (HTML con
+# status 200) después del primer pedido (08-oct-2026). El CDN responde con el CSV,
+# su `Last-Modified` y un 404 para el año que no existe (2020 no se publicó).
+URL_CSV = (
+    "https://cdn.buenosaires.gob.ar/datosabiertos/datasets/secretaria-legal-y-tecnica/"
+    "declaraciones-juradas/declaraciones-juradas-{anio}.csv"
+)
+PRIMER_ANIO = 2015
+
+
+def anios_a_probar(anio_actual: int) -> range:
+    """De 2015 al año que viene: el del año próximo aparece apenas empieza."""
+    return range(PRIMER_ANIO, anio_actual + 2)
+
 
 # Columna del CSV → clave en `bienes_por_tipo`.
 COMPONENTES: dict[str, str] = {
