@@ -72,7 +72,7 @@ Ports include `ILLMProvider`, `IAgentLLM`, `IEmbeddingProvider`, `IVectorSearch`
 
 | Module | What it does |
 |--------|--------------|
-| `answers/` | The answer engines and everything around them: `engine.py` (the `AnswerEngine` contract and engine selection), `agent_engine.py` (tool-using agent), `legacy_engine.py` (the LangGraph graph behind the same contract), `runner.py` (`EngineRunner`: greetings/injection filter, semantic cache, history, stale-data notice, `query_analytics`, audit), `tools/` (the agent's tools), `verification.py` (figure checker), `prompt.py`. |
+| `answers/` | The answer engines and everything around them: `engine.py` (the `AnswerEngine` contract and engine selection), `agent_engine.py` (tool-using agent), `legacy_engine.py` (the LangGraph graph behind the same contract), `runner.py` (`EngineRunner`: the turn deadline and a `query_analytics` row for a turn that did not finish, for every engine; for an engine that does not handle the rest itself, today the agent, also the greetings/injection filter, semantic cache, history, stale-data notice, `query_analytics` and audit, which the legacy graph does in its own nodes), `tools/` (the agent's tools), `verification.py` (figure checker), `prompt.py`. |
 | `consultas/` | Query builders shared by the agent and the MCP data mode: number formats stored as text (`numeros`), date columns and period filters (`fechas`), the filter grammar (`filtros`), value suggestions when a filter matches nothing (`sugerencias`), aggregates (`agregar`). All values travel as bound parameters. |
 | `catalog/` | Catalogue naming and integrity: physical table names, collapsing duplicate copies of the same file in search results (`collapse.py`), the nightly search recall canary (`search_canary.py`), registry reconciliation, schema snapshots. |
 | `quality/` | Signals that reach a person: how old the data behind an answer is (`data_age.py`), mart expectations, source heartbeats, portal and model canaries, and Telegram alerts (`alerting.py`). |
@@ -133,9 +133,11 @@ After the agent answers, every figure in the text is looked up in what the tools
 
 Except with `off`, causal phrases ("generó", "debido a"…) are logged to `answers.causal` (`answers/neutrality.py`); they never change the answer.
 
-### Stale-data notice
+### Stale-data notice (agent engine)
 
-`EngineRunner` puts at most two notices **at the top of the answer text** when the cited evidence's last observation is late for its frequency, or the source itself says the series is no longer updated (`quality/data_age.py`). Questions that name a closed period ("first half of 2026") do not trigger it. Because it is in the text, `/ask`, the MCP and the web chat all show it.
+For an engine that does not handle the cross-cutting work itself (`handles_cross_cutting = False`, today only the agent), `EngineRunner` puts at most two notices **at the top of the answer text** when the cited evidence's last observation is late for its frequency, or the source itself says the series is no longer updated (`quality/data_age.py`). Questions that name a closed period ("first half of 2026") do not trigger it. Because it is in the text, `/ask`, the MCP and the web chat all show it. For a catalogue table, which carries no date of its last observation, it adds to `warnings` when OpenArg last read it.
+
+The legacy graph (`handles_cross_cutting = True`) does not get the notice in the text: the runner leaves the turn to the graph, and its `finalize` node only adds to `warnings` when the catalogue table it served was last read (`staleness_warning`).
 
 ### The legacy graph
 
@@ -216,7 +218,9 @@ Two ETLs worth knowing: the series ETL loads into `<table>__nueva` and swaps wit
 
 ## Public API and public MCP
 
-All public endpoints authenticate with the user's key: `Authorization: Bearer oarg_sk_…` (keys are created from the frontend through `/api/v1/developers/keys`).
+The public endpoints authenticate with the user's key: `Authorization: Bearer oarg_sk_…` (keys are created from the frontend through `/api/v1/developers/keys`). For that to work, a path has to be in `_ALWAYS_PUBLIC` in both auth middlewares (`presentation/http/middleware/auth_middleware.py` and `google_jwt_middleware.py`), so that they let it through to the router's own key check.
+
+> **Known issue: `POST /api/v1/catalogo/agregar` (the MCP's `agregar_datos`) is rejected in prod.** It is the one data-mode path missing from `_ALWAYS_PUBLIC`. With `APP_ENV=prod`, which `docker-compose.prod.yml` sets on staging and prod alike, a request carrying only the user's key gets a 401: from `APIKeyMiddleware` when `BACKEND_API_KEY` is set, because the request has no `X-API-Key`, and otherwise from `GoogleJwtAuthMiddleware`, which is mandatory in prod and does not accept an `oarg_sk_` key as a Google token. The MCP shows that 401 as an invalid or revoked key (`mcp_publico/core.py`). It only works where neither middleware is installed (outside prod, with no `BACKEND_API_KEY` and no `GOOGLE_OAUTH_CLIENT_ID`). The fix is adding the path to both lists.
 
 | Endpoint | Mode | Counts against |
 |----------|------|----------------|
@@ -225,7 +229,7 @@ All public endpoints authenticate with the user's key: `Authorization: Bearer oa
 | `GET /api/v1/catalogo/buscar` | Data | Monthly data requests |
 | `GET /api/v1/catalogo/tabla` | Data | Monthly data requests |
 | `POST /api/v1/catalogo/datos` | Data | Monthly data requests |
-| `POST /api/v1/catalogo/agregar` | Data | Monthly data requests |
+| `POST /api/v1/catalogo/agregar` (rejected in prod today, see the note above) | Data | Monthly data requests |
 
 Quotas (`application/public_quota.py`, `api_key_service.py`), counted per person and reset on the 1st at 00:00 UTC:
 
@@ -245,7 +249,7 @@ The **public MCP** (`mcp_publico/`, `docker/mcp.Dockerfile`) is stateless and ha
 | `buscar_datasets` | `GET /api/v1/catalogo/buscar` |
 | `describir_tabla` | `GET /api/v1/catalogo/tabla` |
 | `obtener_datos` | `POST /api/v1/catalogo/datos` |
-| `agregar_datos` | `POST /api/v1/catalogo/agregar` |
+| `agregar_datos` | `POST /api/v1/catalogo/agregar` (gets a 401 in prod today, see the known issue above) |
 
 It also serves the site at `/` and `/health`. Its timeout to the backend (`MCP_BACKEND_TIMEOUT_SECONDS`, 75 s) must stay above `PUBLIC_API_TIMEOUT_SECONDS` + 10 s. See [`mcp_publico/README.md`](mcp_publico/README.md) and [`specs/029-mcp-publico/`](specs/029-mcp-publico/spec.md). The operations MCP in [`scripts/ops_mcp/`](scripts/ops_mcp/README.md) is a different, internal tool.
 
@@ -261,7 +265,7 @@ It also serves the site at `/` and `/health`. Its timeout to the backend (`MCP_B
 | Chat | POST | `/api/v1/query/smart` | Service |
 | Chat | WS | `/api/v1/query/ws/smart` | `X-API-Key` in the handshake (the `?api_key=` query param still works but is deprecated); optional `id_token` in the first message |
 | Public API | POST | `/api/v1/ask` | `Bearer oarg_sk_…` |
-| Public API (data mode) | GET/POST | `/api/v1/fuentes`, `/api/v1/catalogo/{buscar,tabla,datos,agregar}` | `Bearer oarg_sk_…` |
+| Public API (data mode) | GET/POST | `/api/v1/fuentes`, `/api/v1/catalogo/{buscar,tabla,datos,agregar}` | `Bearer oarg_sk_…`; `agregar` is missing from the middlewares' public paths, so in prod it also asks for the service key and the Google token (see [the known issue](#public-api-and-public-mcp)) |
 | Developers | POST/GET/DELETE | `/api/v1/developers/keys`, `/api/v1/developers/usage` | Service |
 | Conversations | GET/POST/PATCH/DELETE | `/api/v1/conversations/*` (incl. message feedback) | Service |
 | Users | POST/GET/PATCH/DELETE | `/api/v1/users/sync`, `/api/v1/users/me*` | Service |
@@ -279,7 +283,7 @@ The old `query_router` (`POST /api/v1/query/`, `/quick`, `/{id}`, `/cache`, `ws/
 
 ## Configuration
 
-Settings are Pydantic models (`setup/config/settings.py`) loaded from `config/{APP_ENV}/config.toml` + `.secrets.toml`, with environment-variable overrides. Variables that matter (no values here; defaults are the code's):
+Settings are Pydantic models (`setup/config/settings.py`) loaded from `config/{APP_ENV}/config.toml` + `.secrets.toml`, with environment-variable overrides. Variables that matter, by the name the app reads (no values here; defaults are the code's; on the servers some of them are built by the compose, see below the table):
 
 | Area | Variables |
 |------|-----------|
@@ -287,14 +291,20 @@ Settings are Pydantic models (`setup/config/settings.py`) loaded from `config/{A
 | Answer engine | `ANSWERS_ENGINE` (`legacy` default / `agent`), `ANSWERS_VERIFY_MODE` (`off` / `shadow` default / `correct`) |
 | Models | `AWS_REGION`, `BEDROCK_AGENT_MODEL` (Sonnet 4.6), `BEDROCK_LLM_MODEL` (Haiku 4.5), `BEDROCK_LLM_MODEL_DEEP`, `BEDROCK_EMBEDDING_MODEL` (Cohere Embed Multilingual v3, 1024 dimensions), `GEMINI_API_KEY`, `GEMINI_MODEL` |
 | AWS credentials | None required in `.env`: boto3's default chain is used, so on the servers the EC2 instance role provides them. `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` still work locally. `S3_BUCKET` |
-| Auth | `BACKEND_API_KEY` (chat/frontend service key, `X-API-Key`), `ADMIN_API_KEY` (`X-Admin-Key`; mandatory in prod and different from the backend key), `GOOGLE_OAUTH_CLIENT_ID` (mandatory in prod: the app refuses to start without it), `DATA_SERVICE_TOKEN`, `CORS_ALLOWED_ORIGINS` |
+| Auth | `BACKEND_API_KEY` (chat/frontend service key, `X-API-Key`), `ADMIN_API_KEY` (`X-Admin-Key`; mandatory in prod and different from the backend key), `GOOGLE_OAUTH_CLIENT_ID` (mandatory in prod: the app refuses to start without it; on the servers it comes from `GOOGLE_CLIENT_ID`, see below), `DATA_SERVICE_TOKEN`, `CORS_ALLOWED_ORIGINS` |
 | Public API / web quotas | `PUBLIC_API_MONTHLY_PREGUNTAS`, `PUBLIC_API_MONTHLY_DATOS`, `PUBLIC_API_FOUNDER_PREGUNTAS`, `PUBLIC_API_FOUNDER_DATOS`, `PUBLIC_API_GLOBAL_DAILY_CAP`, `PUBLIC_API_IP_DAILY_LIMIT`, `PUBLIC_API_USER_UNBILLED_DAILY_LIMIT`, `PUBLIC_API_TIMEOUT_SECONDS`, `PUBLIC_WEB_MONTHLY_PREGUNTAS`, `PUBLIC_WEB_FOUNDER_PREGUNTAS`, `PUBLIC_WEB_GLOBAL_DAILY_CAP` |
 | Public MCP | `BACKEND_URL`, `MCP_ALLOWED_HOSTS`, `MCP_BACKEND_TIMEOUT_SECONDS` |
 | Workers and beat | `OPENARG_BEAT_DESACTIVADAS`, `OPENARG_COLLECTOR_CONCURRENCY`, `OPENARG_HEAVY_COLLECT_QUEUE`, `OPENARG_HEAVY_RETRY_QUEUE`, `OPENARG_ENABLE_STARTUP_BOOTSTRAP` (off by default) |
 | Ingestion | `OPENARG_HEADER_FROM_DATA_SEVERITY` (`critical` by default: an open finding hides the table from the sandbox; `warn` only records it), `OPENARG_MART_MAX_UNION_TABLES` |
 | Alerts | `OPENARG_TELEGRAM_TOKEN`, `OPENARG_TELEGRAM_CHAT_ID` |
 
-More detail in [`docs/configuration.md`](docs/configuration.md). [`.env.example`](.env.example) is the template for a server `.env`.
+**On the servers.** `docker-compose.prod.yml` uses the server `.env` twice: as the `env_file:` of the backend, the workers, beat and the frontend, and to fill the `${…}` of the `environment:` blocks, which win over the `env_file:`. So some of the names above do not go in the `.env`:
+
+- `GOOGLE_OAUTH_CLIENT_ID` is set from `GOOGLE_CLIENT_ID` (`${GOOGLE_CLIENT_ID:-}`, the same Google client the frontend uses). The `.env` carries `GOOGLE_CLIENT_ID`; a `GOOGLE_OAUTH_CLIENT_ID` written there is overwritten, with an empty value if `GOOGLE_CLIENT_ID` is missing, and then the backend does not start.
+- `DATABASE_URL` (through PgBouncer), `SANDBOX_DATABASE_URL` (role `openarg_sandbox_ro`), `CELERY_BROKER_URL`, `CELERY_RESULT_BACKEND` and `REDIS_CACHE_URL` are built from `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB`, `POSTGRES_HOST` and `REDIS_PASSWORD`.
+- `MCP_ALLOWED_HOSTS` is built from `MCP_DOMAIN` (default `mcp.openarg.org`, which the `Caddyfile` also reads) plus the internal hosts.
+
+[`.env.example`](.env.example) uses the compose's names (`GOOGLE_CLIENT_ID`, `POSTGRES_*`, `REDIS_PASSWORD`) and is the starting point for a server `.env`, but it does not list `POSTGRES_HOST`, and its `SANDBOX_DATABASE_URL` is overwritten by the compose. More detail in [`docs/configuration.md`](docs/configuration.md).
 
 ---
 

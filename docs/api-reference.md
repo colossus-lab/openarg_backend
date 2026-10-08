@@ -288,7 +288,8 @@ no valid key it can come as `api_key` in the first message.
 ```
 
 `clear_answer` means "discard what was streamed so far": the final text replaces it
-(stale-data notice added at the top, or the agent's corrective round).
+(with the agent: the stale-data notice added at the top, or its corrective round; with
+the legacy graph: a second analyst pass after a replan).
 
 ---
 
@@ -543,9 +544,18 @@ bound parameters (`application/consultas/`, `application/public_catalog.py`).
 | `GET /api/v1/catalogo/buscar?q=…&portal=…&limite=…` | Semantic catalogue search (`limite` 1–25), one entry per file |
 | `GET /api/v1/catalogo/tabla` | Describe a table: columns, types, rows, sample |
 | `POST /api/v1/catalogo/datos` | Read rows with columns, period, filters and order |
-| `POST /api/v1/catalogo/agregar` | Sum, count, average, min/max with grouping and filters |
+| `POST /api/v1/catalogo/agregar` | Sum, count, average, min/max with grouping and filters (rejected in prod today, see below) |
 
 See `catalogo_router.py` for the request and response models.
+
+> **Known issue: `/api/v1/catalogo/agregar` gets a 401 in prod.** The user's key only
+> reaches the router's own check on the paths listed in `_ALWAYS_PUBLIC` of
+> `presentation/http/middleware/auth_middleware.py` and `google_jwt_middleware.py`, and
+> `/api/v1/catalogo/agregar` is not there. With `APP_ENV=prod` the request is rejected
+> before the router: by `APIKeyMiddleware` (`"Invalid or missing API key"`) when
+> `BACKEND_API_KEY` is set, otherwise by `GoogleJwtAuthMiddleware`, which does not take an
+> `oarg_sk_` key as a Google token. The MCP's `agregar_datos` shows it as an invalid or
+> revoked key. The other data-mode endpoints are in the list.
 
 ---
 
