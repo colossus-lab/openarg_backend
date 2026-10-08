@@ -88,7 +88,12 @@ class HealthCheckService:
             await r.aclose()
 
     async def _check_ddjj(self) -> dict:
-        count = self._ddjj.record_count
+        # Las DDJJ salen de `raw.cache_ddjj_declaraciones` (`ingest_ddjj_oa`): sin
+        # la tabla, el conector no tiene qué servir.
+        try:
+            count = await self._ddjj.contar()
+        except Exception as exc:
+            return {"status": "unhealthy", "records": 0, "error": type(exc).__name__}
         return {
             "status": "healthy" if count > 0 else "unhealthy",
             "records": count,

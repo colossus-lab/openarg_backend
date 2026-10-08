@@ -11,16 +11,17 @@ if TYPE_CHECKING:
     from app.infrastructure.adapters.connectors.ddjj_adapter import DDJJAdapter
 
 
-def _not_found_result(searched_name: str) -> DataResult:
-    """Return an informative DataResult when a person is not found in the DDJJ dataset.
+def _not_found_result(searched_name: str, cobertura: str) -> DataResult:
+    """Return an informative DataResult when a person is not found in the DDJJ tables.
 
     This ensures the analyst gets explicit "not found" info instead of
-    receiving zero results and hallucinating that data exists.
+    receiving zero results and hallucinating that data exists. The coverage
+    comes from the tables themselves, so it stays right when a new year lands.
     """
     return DataResult(
-        source="ddjj:oficina_anticorrupcion",
-        portal_name="Declaraciones Juradas Patrimoniales — Oficina Anticorrupción",
-        portal_url="https://www.argentina.gob.ar/anticorrupcion/consultar-declaraciones-juradas-de-funcionarios-publicos",
+        source="ddjj:todas",
+        portal_name="Declaraciones Juradas Patrimoniales",
+        portal_url="https://datos.jus.gob.ar/dataset/declaraciones-juradas-patrimoniales-integrales",
         dataset_title=f'DDJJ de "{searched_name}" — NO ENCONTRADO',
         format="json",
         records=[
@@ -28,37 +29,36 @@ def _not_found_result(searched_name: str) -> DataResult:
                 "nombre_buscado": searched_name,
                 "resultado": "NO ENCONTRADO",
                 "nota": (
-                    f'No se encontró a "{searched_name}" en el dataset de DDJJ. '
-                    "Este dataset contiene ÚNICAMENTE las 195 declaraciones juradas "
-                    "de Diputados Nacionales (ejercicio 2024). No incluye senadores, "
-                    "ex-presidentes, gobernadores ni otros funcionarios."
+                    f'No se encontró a "{searched_name}" en las declaraciones juradas cargadas: '
+                    f"{cobertura}. No incluye jueces en general ni funcionarios provinciales."
                 ),
             }
         ],
         metadata={
             "total_records": 0,
             "fetched_at": datetime.now(UTC).isoformat(),
-            "description": (
-                f"Búsqueda de '{searched_name}' sin resultados. "
-                "El dataset solo cubre Diputados Nacionales."
-            ),
+            "description": f"Búsqueda de '{searched_name}' sin resultados. Cobertura: {cobertura}.",
             "not_found": True,
         },
     )
 
 
-def execute_ddjj_step(
+async def execute_ddjj_step(
     step: PlanStep,
     ddjj: DDJJAdapter,
 ) -> list[DataResult]:
     params = step.params
     action = params.get("action", "search")
+    anio = params.get("anio") or params.get("year")
 
     if action == "ranking":
-        result = ddjj.ranking(
+        result = await ddjj.ranking(
             sort_by=params.get("sortBy", "patrimonio"),
             top=params.get("top", 10),
             order=params.get("order", "desc"),
+            anio=anio,
+            cargo=params.get("cargo"),
+            organismo=params.get("organismo"),
         )
         position = params.get("position")
         if position and result.records and len(result.records) >= position:
@@ -74,21 +74,22 @@ def execute_ddjj_step(
         return [result] if result.records else []
 
     if action == "stats":
-        result = ddjj.stats()
+        result = await ddjj.stats(anio=anio, cargo=params.get("cargo"))
         return [result] if result.records else []
 
     # Name-based searches: return explicit "not found" result so the analyst
     # can tell the user *why* (dataset scope) instead of hallucinating.
     searched_name = params.get("nombre", params.get("query", ""))
     if action == "detail" or params.get("nombre"):
-        result = ddjj.get_by_name(params.get("nombre", ""))
+        result = await ddjj.get_by_name(params.get("nombre", ""))
     else:
-        result = ddjj.search(params.get("query", params.get("nombre", "")))
+        result = await ddjj.search(params.get("query", params.get("nombre", "")))
 
     if result.records:
         return [result]
 
     # Person not found — return an informative result instead of empty list
     if searched_name:
-        return [_not_found_result(searched_name)]
+        cobertura = ddjj.describir_cobertura(await ddjj.cobertura())
+        return [_not_found_result(searched_name, cobertura)]
     return []

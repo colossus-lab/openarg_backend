@@ -8,7 +8,6 @@ acción y los parámetros a la vista.
 
 from __future__ import annotations
 
-import asyncio
 from datetime import date
 from typing import Any
 
@@ -1063,43 +1062,72 @@ class DeclaracionesJuradas:
     status = "Consultando declaraciones juradas..."
 
     def describe(self, args: dict[str, Any]) -> str:
-        if args.get("accion") == "buscar" and args.get("nombre"):
+        accion = args.get("accion")
+        if accion == "buscar" and args.get("nombre"):
             return f"Buscando la declaración jurada de {quoted(args.get('nombre'))}"
-        if args.get("accion") == "ranking":
+        if accion == "evolucion" and args.get("nombre"):
+            return f"Armando la evolución patrimonial de {quoted(args.get('nombre'))}"
+        if accion == "ranking":
             return "Armando el ranking de declaraciones juradas"
         return self.status
 
     spec = AgentTool(
         name="declaraciones_juradas",
         description=(
-            "Declaraciones juradas patrimoniales de diputados nacionales (Oficina "
-            "Anticorrupción). `buscar` por nombre, `ranking` por patrimonio, ingresos o bienes, "
-            "`estadisticas` para totales generales (`cantidad_con_patrimonio_negativo` es "
-            "cuántos tienen patrimonio negativo). "
+            "Declaraciones juradas patrimoniales (parte pública, sin grupo familiar). Fuentes: "
+            "Oficina Anticorrupción (`jurisdiccion` nacional, 2012 en adelante: Poder Ejecutivo "
+            "Nacional, diputados, senadores, parte del Poder Judicial y del Ministerio Público, "
+            "con el detalle de bienes) y Ciudad de Buenos Aires (`jurisdiccion` caba, 2023 en "
+            "adelante: funcionarios del Ejecutivo porteño; sólo bienes, sin deudas ni patrimonio "
+            "neto). No hay declaraciones de jueces en general ni de provincias. "
+            "`buscar` por nombre o CUIT (trae todos los años, el más nuevo primero), "
+            "`evolucion` para lo declarado año por año por una persona, `ranking` por "
+            "patrimonio, ingresos o bienes, `estadisticas` para totales generales "
+            "(`cantidad_con_patrimonio_negativo` es cuántos tienen patrimonio negativo). "
+            "Ranking y estadísticas toman una declaración por persona en el año pedido (por "
+            "defecto, el último disponible) y se pueden acotar con `poder`, `organismo` (texto, "
+            "p. ej. 'DIPUTADOS DE LA NACION', 'SENADO', 'ARCA') o `cargo` (p. ej. 'diputado "
+            "nacional', 'ministro'). Para «diputados» o «senadores», usá `cargo`: `poder` "
+            "legislativo incluye también a sus empleados. Los montos son nominales; al comparar "
+            "años decí que no están ajustados por inflación. "
             "No califiques ninguna variación, patrimonio ni ingreso como sospechoso o llamativo "
             "ni lo atribuyas a nada. La cifra de una persona va con su nombre y el año de la "
             "DDJJ. Si la pregunta pide señalar a quiénes les cabe un juicio, no contestes con "
             "nombres ni con un ranking: usá `estadisticas` y dá el total, el promedio y la "
             "mediana, con su año; si trae `excluidas_por_inconsistencia`, decí cuántas "
             "declaraciones quedaron afuera por inconsistencia, y decí que se puede buscar la "
-            "DDJJ de un diputado por su nombre. En ese caso, la cifra propia de una persona, sólo "
-            "si la pregunta la nombra. "
-            "Una fila con `inconsistente: true` (total de bienes) o `ingresos_inconsistentes: "
-            "true` es un registro del dataset con cifras que no cierran con la propia DDJJ, "
-            "probable error de carga no verificado (el motivo está en la fila), y esa cifra no es "
-            "comparable. `inconsistente` la saca de rankings y estadísticas; "
-            "`ingresos_inconsistentes`, sólo del ranking por ingresos: sus bienes cierran y sigue "
-            "en los demás rankings y en las estadísticas (`excluidas_por_inconsistencia` dice "
-            "cuántas se excluyeron). No uses esa cifra, no le calcules variación, nunca la "
-            "presentes como enriquecimiento y no nombres a la persona excluida salvo que pregunten "
-            "por ella; si preguntan, decí que en el dataset esa cifra de su DDJJ no cierra con el "
-            "resto de la declaración, sin atribuírselo a la persona."
+            "DDJJ de un funcionario por su nombre. En ese caso, la cifra propia de una persona, "
+            "sólo si la pregunta la nombra. "
+            "Una fila con `inconsistente: true` es un registro publicado cuyo total de bienes no "
+            "cierra con la propia DDJJ, probable error de carga no verificado (el motivo está en "
+            "la fila), y esa cifra no es comparable. Una fila con `ingresos_inconsistentes: "
+            "true` declara un ahorro que no se refleja en sus bienes: no lo presentes como error "
+            "de la persona ni como irregularidad. `inconsistente` la saca de rankings y "
+            "estadísticas; `ingresos_inconsistentes`, sólo del ranking por ingresos: sus bienes "
+            "cierran y sigue en los demás rankings y en las estadísticas "
+            "(`excluidas_por_inconsistencia` dice cuántas se excluyeron). No uses una cifra "
+            "inconsistente, no le calcules variación, nunca la presentes como enriquecimiento y "
+            "no nombres a la persona excluida salvo que pregunten por ella; si preguntan, decí "
+            "que en el registro publicado esa cifra de su DDJJ no cierra con el resto de la "
+            "declaración, sin atribuírselo a la persona. Si `buscar` no encuentra a alguien, "
+            "decí qué cubren las fuentes (`cobertura`) en vez de suponer que no declaró."
         ),
         input_schema={
             "type": "object",
             "properties": {
-                "accion": {"type": "string", "enum": ["buscar", "ranking", "estadisticas"]},
-                "nombre": {"type": "string"},
+                "accion": {
+                    "type": "string",
+                    "enum": ["buscar", "evolucion", "ranking", "estadisticas"],
+                },
+                "nombre": {"type": "string", "description": "Nombre o CUIT."},
+                "anio": {"type": "integer", "minimum": 2012, "maximum": 2100},
+                "jurisdiccion": {"type": "string", "enum": ["nacional", "caba"]},
+                "poder": {
+                    "type": "string",
+                    "enum": ["ejecutivo", "legislativo", "judicial", "ministerio_publico"],
+                },
+                "organismo": {"type": "string"},
+                "cargo": {"type": "string"},
                 "ordenar_por": {"type": "string", "enum": ["patrimonio", "ingresos", "bienes"]},
                 "orden": {"type": "string", "enum": ["desc", "asc"]},
                 "cantidad": {"type": "integer", "minimum": 1, "maximum": 50},
@@ -1111,22 +1139,39 @@ class DeclaracionesJuradas:
     async def run(self, args: dict[str, Any], ctx: ToolContext) -> ToolOutcome:
         ddjj = ctx.deps.ddjj
         accion = str_arg(args, "accion", required=True, max_len=20)
+        anio = int_arg(args, "anio", 0, 0, 2100) or None
+        jurisdiccion = str_arg(args, "jurisdiccion", max_len=10)
+        if jurisdiccion not in (None, "nacional", "caba"):
+            raise ToolInputError("`jurisdiccion` es nacional o caba.")
+        filtros = {
+            "poder": str_arg(args, "poder", max_len=20),
+            "organismo": str_arg(args, "organismo", max_len=120),
+            "cargo": str_arg(args, "cargo", max_len=120),
+        }
         if accion == "buscar":
             nombre = str_arg(args, "nombre", required=True, max_len=120) or ""
-            result = await asyncio.to_thread(ddjj.search, nombre, 10)
+            result = await ddjj.search(nombre, 10, anio=anio, jurisdiccion=jurisdiccion)
+        elif accion == "evolucion":
+            nombre = str_arg(args, "nombre", required=True, max_len=120) or ""
+            result = await ddjj.evolucion(nombre, jurisdiccion=jurisdiccion)
         elif accion == "ranking":
-            result = await asyncio.to_thread(
-                ddjj.ranking,
+            result = await ddjj.ranking(
                 str_arg(args, "ordenar_por", max_len=20) or "patrimonio",
                 int_arg(args, "cantidad", 10, 1, 50),
                 str_arg(args, "orden", max_len=4) or "desc",
+                anio=anio,
+                jurisdiccion=jurisdiccion or "nacional",
+                **filtros,
             )
         elif accion == "estadisticas":
-            result = await asyncio.to_thread(ddjj.stats)
+            result = await ddjj.stats(anio=anio, jurisdiccion=jurisdiccion or "nacional", **filtros)
         else:
-            raise ToolInputError("`accion` es buscar, ranking o estadisticas.")
+            raise ToolInputError("`accion` es buscar, evolucion, ranking o estadisticas.")
         if result is None or not result.records:
-            return ToolOutcome(to_json({"filas": [], "nota": "Sin resultados."}))
+            nota: dict[str, Any] = {"filas": [], "nota": "Sin resultados."}
+            if cobertura := (result.metadata or {}).get("cobertura") if result else None:
+                nota["cobertura"] = cobertura
+            return ToolOutcome(to_json(nota))
         extra: dict[str, Any] = {}
         if excluidas := (result.metadata or {}).get("excluidas_por_inconsistencia"):
             extra["excluidas_por_inconsistencia"] = excluidas

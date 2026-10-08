@@ -1137,10 +1137,12 @@ def cargar_oa(
 # total, y algunos son imposibles: una controladora de faltas con $21,5 billones en
 # inmuebles en 2025, cuando la mediana del año es $15 millones y la declaración
 # más grande de la OA en 2024 es de $614.000 millones. Se marca inconsistente lo
-# que pasa 10.000 veces la mediana de su año: 15 de las 9.135 declaraciones de
-# 2023-2026 (08-oct), todas desde los $150.000 millones. Queda afuera de rankings
-# y promedios, como en la OA.
-_VECES_MEDIANA_CABA = 10_000
+# que pasa 1.000 veces la mediana de su año. Con 10.000 quedaban adentro un
+# asesor con $150.672 millones en inmuebles (9.920 veces) y jefes de departamento
+# con $90.000 millones; entre 1.000 y 10.000 veces no hay un corte natural, y
+# todo lo de esa franja son cargos medios con cifras de fortuna. Queda afuera de
+# rankings y promedios, como en la OA, y el ranking dice cuántas excluyó.
+_VECES_MEDIANA_CABA = 1_000
 _SQL_INCONSISTENTES_CABA = """
     UPDATE raw."{decl}__nueva" d SET inconsistente = true
     FROM (
@@ -1451,3 +1453,184 @@ def ingest_ddjj_caba(
         return "escrita", mani, resumen
 
     return _ejecutar(self, engine, caba.FUENTE, "DDJJ CABA", cuerpo)
+
+
+# ── retiro de las tablas del colector genérico ───────────────────────────────
+
+# Sin esquema: `cache_drop_audit` está en `raw` o en `public` según la base, y el
+# search_path del engine (public, raw) la encuentra en cualquiera de los dos.
+_AUDITAR_RETIRO = text(
+    """
+    INSERT INTO cache_drop_audit (object_name, reason, actor, extra, dropped_at)
+    VALUES (:obj, 'reemplazada_por_ddjj', 'ddjj_tasks.retirar_ddjj_genericas',
+            CAST(:extra AS jsonb), now())
+    """
+)
+
+
+@dataclass
+class TablaVieja:
+    esquema: str
+    tabla: str
+    filas: int
+    por: str  # "catalogo" (dataset reemplazado) o "firma" (columnas de la OA)
+
+
+def tablas_viejas(engine: Engine) -> tuple[list[TablaVieja], list[str]]:
+    """Las tablas que armó el colector genérico con las DDJJ, y los ids de sus datasets.
+
+    Dos caminos:
+
+    - **Catálogo:** las que nombra `cached_datasets` para los datasets de
+      `reemplazos.REEMPLAZADOS`.
+    - **Firma:** las que tienen las columnas de la OA (`dj_id` y
+      `funcionario_apellido_nombre`), aunque no estén en el catálogo. Son los
+      pedazos de ZIP (`_s<hash>`) y los desbordes (`_r<id>`) que registró el pase
+      de huérfanas.
+
+    No alcanza con el nombre: `datos_gob_ar__declaraciones_juradas_patrimoniales__*`
+    también es el dataset de ARSAT, que es otra planilla (Apellido, Nombre, Cargo,
+    Tipo, Cumplimiento) y se queda. Nuestras `cache_ddjj_*` no tienen esas
+    columnas y además se excluyen por nombre.
+    """
+    from app.application.ddjj.reemplazos import REEMPLAZADOS
+
+    pares = [{"p": p, "t": t} for p, t in sorted(REEMPLAZADOS)]
+    with engine.connect() as conn:
+        por_catalogo: list[Any] = []
+        for par in pares:
+            por_catalogo += conn.execute(
+                text(
+                    "SELECT cd.table_name, CAST(cd.dataset_id AS text) AS dataset_id "
+                    "FROM raw.cached_datasets cd JOIN datasets d ON d.id = cd.dataset_id "
+                    "WHERE d.portal = :p AND trim(d.title) = :t"
+                ),
+                par,
+            ).all()
+        por_firma = conn.execute(
+            text(
+                """
+                SELECT a.table_name FROM information_schema.columns a
+                JOIN information_schema.columns b
+                  ON b.table_schema = a.table_schema AND b.table_name = a.table_name
+                 AND b.column_name = 'funcionario_apellido_nombre'
+                WHERE a.column_name = 'dj_id' AND a.table_schema IN ('raw', 'public')
+                """
+            )
+        ).all()
+        origen: dict[str, str] = {}
+        for fila in por_catalogo:
+            origen[str(fila.table_name)] = "catalogo"
+        for fila in por_firma:
+            origen.setdefault(str(fila.table_name), "firma")
+        tablas: list[TablaVieja] = []
+        for nombre, por in sorted(origen.items()):
+            if nombre.startswith("cache_ddjj_"):
+                continue
+            ubicada = conn.execute(
+                text(
+                    """
+                    SELECT n.nspname AS esquema, GREATEST(c.reltuples, 0)::bigint AS filas
+                    FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+                    WHERE c.relname = :t AND c.relkind = 'r' AND n.nspname IN ('raw', 'public')
+                    ORDER BY n.nspname = 'raw' DESC LIMIT 1
+                    """
+                ),
+                {"t": nombre},
+            ).first()
+            if ubicada is not None:
+                tablas.append(TablaVieja(str(ubicada.esquema), nombre, int(ubicada.filas), por))
+        dataset_ids = sorted({str(f.dataset_id) for f in por_catalogo})
+    return tablas, dataset_ids
+
+
+def retirar(engine: Engine, *, dry_run: bool) -> dict[str, Any]:
+    """Borra las tablas viejas de DDJJ con su registro, o dice cuáles borraría."""
+    from app.application.catalog.registry_reconcile import require_registry
+
+    # El mismo piso que las demás limpiezas: sin registro no se borra nada.
+    require_registry(engine, task="retirar_ddjj_genericas")
+    with engine.connect() as conn:
+        for tabla in (TABLA_DECLARACIONES, TABLA_BIENES, TABLA_DEUDAS):
+            if not _existe(conn, tabla):
+                raise _Falla("retiro", f"falta raw.{tabla}: primero cargar las DDJJ propias")
+    tablas, dataset_ids = tablas_viejas(engine)
+    resumen: dict[str, Any] = {
+        "tablas": len(tablas),
+        "filas": sum(t.filas for t in tablas),
+        "datasets": len(dataset_ids),
+        "por_catalogo": sum(1 for t in tablas if t.por == "catalogo"),
+        "por_firma": sum(1 for t in tablas if t.por == "firma"),
+    }
+    if dry_run:
+        resumen["borraria"] = [f"{t.esquema}.{t.tabla} ({t.filas} filas, {t.por})" for t in tablas]
+        return resumen
+    borradas: list[str] = []
+    fallidas: list[str] = []
+    for t in tablas:
+        try:
+            with engine.begin() as conn:
+                # Sin CASCADE: si una vista (un mart) depende de la tabla, falla y
+                # se deja, en vez de llevarse la vista.
+                conn.execute(text(f'DROP TABLE "{t.esquema}"."{t.tabla}"'))
+                conn.execute(
+                    text(
+                        "UPDATE public.raw_table_versions SET superseded_at = now() "
+                        "WHERE table_name = :t AND superseded_at IS NULL"
+                    ),
+                    {"t": t.tabla},
+                )
+                conn.execute(
+                    text("DELETE FROM raw.cached_datasets WHERE table_name = :t"), {"t": t.tabla}
+                )
+        except Exception as exc:
+            fallidas.append(f"{t.tabla}: {type(exc).__name__}")
+            logger.warning("DDJJ retiro: no se pudo borrar %s", t.tabla, exc_info=True)
+            continue
+        borradas.append(t.tabla)
+        try:
+            with engine.begin() as conn:
+                conn.execute(
+                    _AUDITAR_RETIRO,
+                    {
+                        "obj": f"{t.esquema}.{t.tabla}",
+                        "extra": json.dumps({"row_count": t.filas, "por": t.por}),
+                    },
+                )
+        except Exception:
+            logger.warning("DDJJ retiro: no se pudo auditar %s", t.tabla, exc_info=True)
+    with engine.begin() as conn:
+        # Lo que queda de los datasets reemplazados: filas del catálogo sin tabla y
+        # embeddings que compiten en la búsqueda sin nada detrás.
+        conn.execute(
+            text("DELETE FROM raw.cached_datasets WHERE CAST(dataset_id AS text) = ANY(:ids)"),
+            {"ids": dataset_ids},
+        )
+        conn.execute(
+            text("DELETE FROM dataset_chunks WHERE CAST(dataset_id AS text) = ANY(:ids)"),
+            {"ids": dataset_ids},
+        )
+    resumen.update({"borradas": len(borradas), "fallidas": fallidas})
+    return resumen
+
+
+@celery_app.task(
+    name="openarg.retirar_ddjj_genericas",
+    bind=True,
+    soft_time_limit=1800,
+    time_limit=1900,
+)
+def retirar_ddjj_genericas(self, *, dry_run: bool = True) -> dict[str, Any]:
+    """Borra las tablas de DDJJ del colector genérico, reemplazadas por `cache_ddjj_*`.
+
+    Por defecto sólo dice qué borraría. No está en el beat: se corre a mano una
+    vez, después de cargar las DDJJ propias y de la migración 0068 (que retira
+    los marts que protegían a estas tablas).
+    """
+    engine = get_sync_engine()
+    resumen = retirar(engine, dry_run=dry_run)
+    hecho = "simulado" if dry_run else "hecho"
+    logger.info(
+        "DDJJ retiro (%s): %s", hecho, {k: v for k, v in resumen.items() if k != "borraria"}
+    )
+    return resumen

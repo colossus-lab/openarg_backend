@@ -310,14 +310,8 @@ SAMPLE_QUERIES: dict[str, list[str]] = {
         "casos penales por jurisdicción",
         "expedientes ministerios públicos",
     ],
-    "ddjj_funcionarios_federales": [
-        "declaraciones juradas funcionarios",
-        "DDJJ funcionarios federales",
-        "patrimonio de funcionarios públicos",
-        "transparencia patrimonial",
-        "bienes declarados funcionarios",
-        "ley de ética pública DDJJ",
-    ],
+    # ddjj_funcionarios_federales se retiró el 08-oct-2026 (migración 0068): las DDJJ
+    # salen del conector `declaraciones_juradas` sobre raw.cache_ddjj_*.
     "archivos_judiciales_recibidos": [
         "archivos judiciales recibidos",
         "expedientes archivados poder judicial",

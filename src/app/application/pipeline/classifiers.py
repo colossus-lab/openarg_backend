@@ -147,8 +147,9 @@ _EDUCATIONAL_PATTERNS: dict[re.Pattern[str], str] = {
     re.compile(r"qu[eé]\s+(es|son)\s+(las\s+)?ddjj", re.IGNORECASE): (
         "Las **DDJJ (Declaraciones Juradas)** son documentos donde "
         "los funcionarios públicos declaran su patrimonio. En OpenArg "
-        "tenemos 195 declaraciones juradas de diputados nacionales.\n\n"
-        "Probá preguntarme: *¿Quién es el diputado con mayor patrimonio?*"
+        "están las que publica la Oficina Anticorrupción (funcionarios "
+        "nacionales, desde 2012) y las de la Ciudad de Buenos Aires (desde 2023).\n\n"
+        "Probá preguntarme: *¿Qué diputado nacional declaró el mayor patrimonio?*"
     ),
     re.compile(r"qu[eé]\s+(es|significa)\s+(el\s+)?tipo\s+de\s+cambio", re.IGNORECASE): (
         "El **tipo de cambio** es el precio de una moneda en términos "
