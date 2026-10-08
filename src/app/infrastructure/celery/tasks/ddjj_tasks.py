@@ -53,6 +53,7 @@ from collections import Counter
 from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
+from email.utils import parsedate_to_datetime
 from typing import Any
 
 import httpx
@@ -81,6 +82,8 @@ TABLA_BIENES = "cache_ddjj_bienes"
 TABLA_DEUDAS = "cache_ddjj_deudas"
 
 _TIMEOUT_S = 120.0
+# Un User-Agent que dice quién pide: el CDN de la Ciudad y datos.jus.gob.ar lo aceptan.
+_HEADERS = {"User-Agent": "OpenArg/1.0 (+https://openarg.org)"}
 # Un número fijo para `pg_advisory_xact_lock`: las cargas de todas las fuentes
 # escriben `cache_ddjj_declaraciones`.
 _LOCK_DDJJ = 7_310_251_208
@@ -201,7 +204,11 @@ def consultar_paquete(
 ) -> list[Recurso]:
     r = client.get(api, params={"id": paquete})
     r.raise_for_status()
-    cuerpo = r.json()
+    try:
+        cuerpo = r.json()
+    except ValueError as exc:
+        # Un WAF contesta con una página HTML y status 200 ("Request Rejected").
+        raise _Falla("paquete", f"CKAN no devolvió JSON: {r.text[:80]!r}") from exc
     if not cuerpo.get("success"):
         raise _Falla("paquete", f"CKAN no devolvió {paquete}")
     recursos = []
@@ -1352,7 +1359,7 @@ def ingest_ddjj_oa(
     engine = get_sync_engine()
 
     def cuerpo() -> tuple[str, list[dict[str, str]] | None, dict[str, Any]]:
-        with httpx.Client(timeout=_TIMEOUT_S, follow_redirects=True) as client:
+        with httpx.Client(timeout=_TIMEOUT_S, follow_redirects=True, headers=_HEADERS) as client:
             recursos = consultar_paquete(client)
             mani = manifiesto(recursos)
             if (
@@ -1403,53 +1410,57 @@ def ingest_ddjj_caba(
 ) -> dict[str, Any]:
     """Carga las DDJJ de la Ciudad de Buenos Aires si algún CSV cambió.
 
-    Los CSV son chicos (~12 MB todos), así que siempre se bajan y se compara su
-    hash con el de la última carga escrita: el de 2026 crece durante el año y
-    CKAN no siempre actualiza la fecha del recurso. Mismos parámetros que
-    `ingest_ddjj_oa`.
+    Los CSV son chicos (~12 MB todos), así que siempre se bajan del CDN (ver
+    `caba.URL_CSV`, la API de CKAN está bloqueada) y se compara su hash con el de
+    la última carga escrita: el del año en curso crece durante el año. Mismos
+    parámetros que `ingest_ddjj_oa`.
     """
     engine = get_sync_engine()
 
     def cuerpo() -> tuple[str, list[dict[str, str]] | None, dict[str, Any]]:
-        with httpx.Client(timeout=_TIMEOUT_S, follow_redirects=True) as client:
-            recursos = [
-                r
-                for r in consultar_paquete(client, caba.PAQUETE, caba.API_PAQUETE)
-                if r.formato == "csv" and caba.anio_de_url(r.url) is not None
-            ]
-            if not recursos:
-                raise _Falla("paquete", f"{caba.PAQUETE} no tiene CSV anuales")
-            recursos.sort(key=lambda r: caba.anio_de_url(r.url) or 0)
-            with tempfile.TemporaryDirectory(prefix="ddjj_caba_") as carpeta:
-                archivos: list[caba.ArchivoCaba] = []
-                mani: list[dict[str, str]] = []
-                for i, rec in enumerate(recursos):
-                    destino = os.path.join(carpeta, f"{i:02d}.csv")
-                    _bajar(client, rec.url, destino)
-                    archivos.append(
-                        caba.ArchivoCaba(
-                            ruta=destino, url=rec.url, corte=_fecha_iso(rec.modificado)
-                        )
+        with (
+            httpx.Client(timeout=_TIMEOUT_S, follow_redirects=True, headers=_HEADERS) as client,
+            tempfile.TemporaryDirectory(prefix="ddjj_caba_") as carpeta,
+        ):
+            archivos: list[caba.ArchivoCaba] = []
+            mani: list[dict[str, str]] = []
+            for anio in caba.anios_a_probar(datetime.now(UTC).year):
+                url = caba.URL_CSV.format(anio=anio)
+                r = client.get(url)
+                if r.status_code == 404:
+                    continue
+                r.raise_for_status()
+                if not r.headers.get("content-type", "").startswith(("text/csv", "text/plain")):
+                    raise _Falla(
+                        "descarga", f"{url} no devolvió un CSV ({r.headers.get('content-type')})"
                     )
-                    mani.append({"url": rec.url, "sha256": _sha256(destino)})
-                if (
-                    not forzar
-                    and not dry_run
-                    and mani == ultima_carga(engine, caba.FUENTE)
-                    and tablas_en_orden(engine, (TABLA_DECLARACIONES,))
-                ):
-                    _latir(engine, ("ddjj-declaraciones",))
-                    logger.info("DDJJ CABA: sin cambios en la fuente")
-                    return "al_dia", mani, {}
-                if dry_run:
-                    formatos = {
-                        a.url.rsplit("/", 1)[-1]: (
-                            "ancho" if caba.es_formato_ancho(caba.leer(a.ruta)[0]) else "largo"
-                        )
-                        for a in archivos
-                    }
-                    return "simulada", mani, {"archivos": formatos}
-                resumen = cargar_caba(engine, archivos, permitir_menos_filas=permitir_menos_filas)
+                destino = os.path.join(carpeta, f"{anio}.csv")
+                with open(destino, "wb") as f:
+                    f.write(r.content)
+                modificado = r.headers.get("last-modified")
+                corte = parsedate_to_datetime(modificado).date() if modificado else None
+                archivos.append(caba.ArchivoCaba(ruta=destino, url=url, corte=corte))
+                mani.append({"url": url, "sha256": _sha256(destino)})
+            if not any((caba.anio_de_url(a.url) or 0) >= 2023 for a in archivos):
+                raise _Falla("descarga", "el CDN no tiene ningún CSV de 2023 en adelante")
+            if (
+                not forzar
+                and not dry_run
+                and mani == ultima_carga(engine, caba.FUENTE)
+                and tablas_en_orden(engine, (TABLA_DECLARACIONES,))
+            ):
+                _latir(engine, ("ddjj-declaraciones",))
+                logger.info("DDJJ CABA: sin cambios en la fuente")
+                return "al_dia", mani, {}
+            if dry_run:
+                formatos = {
+                    a.url.rsplit("/", 1)[-1]: (
+                        "ancho" if caba.es_formato_ancho(caba.leer(a.ruta)[0]) else "largo"
+                    )
+                    for a in archivos
+                }
+                return "simulada", mani, {"archivos": formatos}
+            resumen = cargar_caba(engine, archivos, permitir_menos_filas=permitir_menos_filas)
         return "escrita", mani, resumen
 
     return _ejecutar(self, engine, caba.FUENTE, "DDJJ CABA", cuerpo)

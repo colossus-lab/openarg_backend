@@ -138,3 +138,67 @@ def test_un_juez_en_el_cargo_no_es_ejecutivo():
         {"id_ddjj": "1", "anio_presentacion": "2025", "cargo": "Juez de Cámara"}, _ARCHIVO
     )
     assert t[3] == "judicial"
+
+
+# ── la descarga desde el CDN ───────────────────────────────
+
+
+def test_anios_a_probar_llega_al_anio_que_viene():
+    assert list(caba.anios_a_probar(2026)) == list(range(2015, 2028))
+
+
+def test_la_tarea_baja_del_cdn_saltea_los_404_y_simula(monkeypatch):
+    import httpx
+
+    from app.infrastructure.celery.tasks import ddjj_tasks as dt
+
+    ancho = (
+        "id_ddjj,anio_presentacion,nombre,apellido,id_cargo,cargo,total_bienes_muebles,"
+        "total_bienes_inmuebles,total_acciones,total_fondos,total_bonos,total_titulos,"
+        "total_dinero_efectivo,total_dinero_electronico,fecha_presentacion\n"
+        "1,2026,Ana,Perez,1,Director,0,100,0,0,0,0,0,0,2026-01-02\n"
+    )
+    pedidos: list[str] = []
+
+    def responder(request: httpx.Request) -> httpx.Response:
+        pedidos.append(str(request.url))
+        assert request.headers["user-agent"].startswith("OpenArg/")
+        if request.url.path.endswith(("-2023.csv", "-2026.csv")):
+            return httpx.Response(
+                200,
+                text=ancho,
+                headers={
+                    "content-type": "text/csv",
+                    "last-modified": "Wed, 30 Sep 2026 21:19:10 GMT",
+                },
+            )
+        return httpx.Response(404, text="no")
+
+    real = httpx.Client
+
+    def cliente(*a, **kw):
+        return real(*a, transport=httpx.MockTransport(responder), **kw)
+
+    monkeypatch.setattr(dt.httpx, "Client", cliente)
+    resultado = dt.ingest_ddjj_caba.run(dry_run=True)
+    assert resultado["estado"] == "simulada"
+    assert resultado["archivos"] == {
+        "declaraciones-juradas-2023.csv": "ancho",
+        "declaraciones-juradas-2026.csv": "ancho",
+    }
+    assert len(pedidos) == len(caba.anios_a_probar(dt.datetime.now(dt.UTC).year))
+    assert all("cdn.buenosaires.gob.ar" in u for u in pedidos)
+
+
+def test_un_waf_que_contesta_html_es_una_falla_clara(monkeypatch):
+    import httpx
+    import pytest as _pytest
+
+    from app.infrastructure.celery.tasks import ddjj_tasks as dt
+
+    def responder(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text="<html><title>Request Rejected</title></html>")
+
+    with httpx.Client(transport=httpx.MockTransport(responder)) as client:
+        with _pytest.raises(dt._Falla, match="no devolvió JSON"):
+            dt.consultar_paquete(client)
