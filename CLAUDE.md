@@ -153,7 +153,7 @@ names) removes entries when the Celery app is created.
 | GET | `/api/v1/catalogo/buscar` | Public data mode: catalogue search |
 | GET | `/api/v1/catalogo/tabla` | Public data mode: describe a table |
 | POST | `/api/v1/catalogo/datos` | Public data mode: read rows |
-| POST | `/api/v1/catalogo/agregar` | Public data mode: aggregates |
+| POST | `/api/v1/catalogo/agregar` | Public data mode: aggregates. Missing from `_ALWAYS_PUBLIC` in both auth middlewares, so with `APP_ENV=prod` a request with only the `oarg_sk_` key (the MCP's `agregar_datos`) gets a 401 |
 | POST/GET/DELETE | `/api/v1/developers/keys`, `/api/v1/developers/usage` | API key CRUD (one active key per user, shown once) and usage |
 | * | `/api/v1/conversations/*`, `/api/v1/users/*` | Chat history, users, privacy, feedback |
 | GET | `/api/v1/datasets/`, `/stats`, `/{id}/download` | List, counts per portal, download (presigned S3 URL or redirect to the portal) |
@@ -199,9 +199,14 @@ that a contributor most often touches:
   - `engine.py` — `AnswerEngine` contract, events, `EngineResult`, and
     `selected_engine_name()` (`ANSWERS_ENGINE`; unknown values fall back to
     `legacy`).
-  - `runner.py` — `EngineRunner`: greetings/injection filter, semantic cache,
-    history, stale-data notice at the top of the text (`quality/data_age.py`),
-    `query_analytics`, metrics, audit, turn deadline.
+  - `runner.py` — `EngineRunner`. For every engine: turn deadline and the
+    `query_analytics` row of a turn that did not finish. For an engine with
+    `handles_cross_cutting = False` (today the agent), also greetings/injection
+    filter, semantic cache, history, stale-data notice at the top of the text
+    (`quality/data_age.py`), `query_analytics`, metrics, audit. The legacy graph
+    (`handles_cross_cutting = True`) does those in its own nodes and gets no
+    notice in the text: `finalize` only adds the catalogue-table read date
+    (`staleness_warning`) to `warnings`.
   - `agent_engine.py` — the tool loop (≤ 10 tool calls, 35 s soft budget,
     25 s per tool), streaming, corrective round with `ANSWERS_VERIFY_MODE=correct`.
   - `tools/` — `buscar_series`, `series_tiempo`, `variables_bcra`,
@@ -316,6 +321,14 @@ GEMINI_API_KEY=...                   # fallback of the legacy LLM
 BACKEND_API_KEY=... ADMIN_API_KEY=... GOOGLE_OAUTH_CLIENT_ID=... DATA_SERVICE_TOKEN=...
 OPENARG_BEAT_DESACTIVADAS=           # beat_schedule keys to skip, comma-separated
 ```
+
+These are the names the app reads. On the servers `docker-compose.prod.yml`
+builds some of them in `environment:`, which wins over the `.env`:
+`GOOGLE_OAUTH_CLIENT_ID` from `GOOGLE_CLIENT_ID`, and `DATABASE_URL`,
+`SANDBOX_DATABASE_URL` and the Redis URLs from `POSTGRES_USER`,
+`POSTGRES_PASSWORD`, `POSTGRES_DB`, `POSTGRES_HOST` and `REDIS_PASSWORD`. For
+those, the server `.env` carries the compose's names, not the app's
+(`docs/configuration.md` § On the servers).
 
 Public API / web quotas (`PUBLIC_API_*`, `PUBLIC_WEB_*`), the MCP (`BACKEND_URL`,
 `MCP_*`) and the rest are listed in `README.md` § Configuration and

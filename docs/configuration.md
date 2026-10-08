@@ -151,15 +151,15 @@ What differs between the TOML files (see the files for the rest):
 
 ## Environment Variables
 
-These override TOML settings or are read directly by the code. Names only: values live in each server's `.env` (template: `.env.example`).
+These override TOML settings or are read directly by the code. Names only. The tables use the name the app reads; on the servers some of them are built by `docker-compose.prod.yml` from other variables of the `.env` (see [On the servers](#on-the-servers-docker-composeprodyml)).
 
 ### Core
 
 | Variable | Description | Required |
 |----------|-------------|----------|
 | `APP_ENV` | Environment (`local`/`dev`/`prod`/`test`) | No (default: `local`) |
-| `DATABASE_URL` | Full PostgreSQL DSN | No (overrides postgres config) |
-| `SANDBOX_DATABASE_URL` | DSN of the read-only role the SQL sandbox uses | Yes in prod |
+| `DATABASE_URL` | Full PostgreSQL DSN | No (overrides postgres config). Built by the compose on the servers |
+| `SANDBOX_DATABASE_URL` | DSN of the read-only role the SQL sandbox uses | Yes in prod. Built by the compose on the servers |
 | `CELERY_BROKER_URL` / `CELERY_RESULT_BACKEND` | Redis broker and results | Yes (for workers) |
 | `REDIS_CACHE_URL` | Redis cache, quotas and rate limits | Yes (default `redis://localhost:6379/2`) |
 | `LOG_LEVEL`, `SENTRY_DSN` | Logging level, error tracking | No |
@@ -186,10 +186,12 @@ These override TOML settings or are read directly by the code. Names only: value
 | Variable | Description |
 |----------|-------------|
 | `BACKEND_API_KEY` | Shared service key the frontend sends in `X-API-Key`. When set, `APIKeyMiddleware` protects every non-public route |
-| `GOOGLE_OAUTH_CLIENT_ID` | Enables `GoogleJwtAuthMiddleware` (user's Google ID token in `Authorization: Bearer`). Mandatory in prod: the app refuses to start without it |
+| `GOOGLE_OAUTH_CLIENT_ID` | Enables `GoogleJwtAuthMiddleware` (user's Google ID token in `Authorization: Bearer`). Mandatory in prod: the app refuses to start without it. On the servers the `.env` carries `GOOGLE_CLIENT_ID` instead, and the compose passes it under this name |
 | `ADMIN_API_KEY` | `X-Admin-Key` for `/api/v1/admin/*` and the transparency POSTs. Mandatory in prod and must differ from `BACKEND_API_KEY` |
 | `DATA_SERVICE_TOKEN` | Bearer token of the internal `/api/v1/data/*` API |
 | `CORS_ALLOWED_ORIGINS` | Comma-separated origins |
+
+Both middlewares let through, without the service key or the Google token, the paths in their `_ALWAYS_PUBLIC` (`/health`, `/health/ready`, `/api/v1/ask`, `/api/v1/fuentes`, `/api/v1/catalogo/buscar`, `/api/v1/catalogo/tabla`, `/api/v1/catalogo/datos`), plus `/docs`, `/openapi.json` and `/redoc` outside prod; `/api/v1/data/*` and `/api/v1/admin/*` have their own auth. `/api/v1/catalogo/agregar` is not in the lists, so with `APP_ENV=prod` a request with only the user's `oarg_sk_` key gets a 401 there (the MCP's `agregar_datos`; see the known issue in the README).
 
 ### Public API, MCP and web quotas
 
@@ -222,6 +224,21 @@ These override TOML settings or are read directly by the code. Names only: value
 | `SANDBOX_MAX_ROWS`, `SANDBOX_TIMEOUT_MS`, `SANDBOX_TABLE_PREFIX`, `INJECTION_THRESHOLD`, `CACHE_SIMILARITY_THRESHOLD` | Security tuning (see `.env.example`) | |
 
 The collector and parser have many more `OPENARG_*` knobs (download size caps, chunk sizes, heavy routing); grep `os.getenv("OPENARG_` under `src/app/infrastructure/celery/tasks/` for the full list.
+
+### On the servers (`docker-compose.prod.yml`)
+
+The compose uses the server `.env` twice: as the `env_file:` of the backend, the workers, beat and the frontend, and to fill the `${…}` of the `environment:` blocks. `environment:` wins over `env_file:`, so for these variables what the app gets is what the compose builds, whatever the `.env` says under the same name:
+
+| The app reads | The compose builds it from (variables of the `.env`) |
+|---------------|------------------------------------------------------|
+| `GOOGLE_OAUTH_CLIENT_ID` (backend, `worker-collector`, `worker-ingest`, `worker-s3`) | `GOOGLE_CLIENT_ID`, the same Google client the frontend uses (`${GOOGLE_CLIENT_ID:-}`: empty if missing, and then the backend does not start in prod) |
+| `DATABASE_URL` | `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB`, through PgBouncer (which reaches `POSTGRES_HOST`) |
+| `SANDBOX_DATABASE_URL` (backend) | Role `openarg_sandbox_ro` with `POSTGRES_PASSWORD`, `POSTGRES_HOST`, `POSTGRES_DB` |
+| `CELERY_BROKER_URL`, `CELERY_RESULT_BACKEND` (backend, workers, beat), `REDIS_CACHE_URL` (backend) | `REDIS_PASSWORD` |
+| `MCP_ALLOWED_HOSTS` (mcp) | `MCP_DOMAIN` (default `mcp.openarg.org`, which the `Caddyfile` also reads) plus the internal hosts |
+| `APP_ENV` | Fixed to `prod` in every service that runs the app, on staging and prod alike |
+
+The compose also passes `BACKEND_API_KEY` (backend), and `AWS_REGION`, `S3_BUCKET` and the AWS key variables (empty unless set) to the backend, the collectors, `worker-ingest` and `worker-s3`, under their own names. `.env.example` uses the compose's names (`GOOGLE_CLIENT_ID`, `POSTGRES_*`, `REDIS_PASSWORD`) but does not list `POSTGRES_HOST`, which pgbouncer and the sandbox DSN need; its `SANDBOX_DATABASE_URL` is overwritten by the compose.
 
 ## Config Loading
 
