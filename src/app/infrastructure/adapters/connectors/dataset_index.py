@@ -1072,19 +1072,19 @@ KEYWORD_ROUTES: dict[str, dict] = {
         "action": "query_ddjj",
         "params": {"action": "ranking"},
         "confidence": 0.95,
-        "description": "Declaraciones juradas patrimoniales de diputados",
+        "description": "Declaraciones juradas patrimoniales de funcionarios nacionales y porteños",
     },
     "declaraciones juradas": {
         "action": "query_ddjj",
         "params": {"action": "ranking"},
         "confidence": 0.95,
-        "description": "Declaraciones juradas patrimoniales de diputados",
+        "description": "Declaraciones juradas patrimoniales de funcionarios nacionales y porteños",
     },
     "ddjj": {
         "action": "query_ddjj",
         "params": {"action": "ranking"},
         "confidence": 0.95,
-        "description": "DDJJ patrimoniales de diputados",
+        "description": "DDJJ patrimoniales de funcionarios nacionales y porteños",
     },
     "patrimonio diputados": {
         "action": "query_ddjj",

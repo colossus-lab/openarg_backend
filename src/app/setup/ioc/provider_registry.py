@@ -271,10 +271,8 @@ class ConnectorProvider(Provider):  # type: ignore[misc]
         return adapter
 
     @provide  # type: ignore[untyped-decorator]
-    def ddjj(self) -> DDJJAdapter:
-        adapter = DDJJAdapter()
-        adapter._ensure_loaded()
-        return adapter
+    def ddjj(self, session_factory: async_sessionmaker[AsyncSession]) -> DDJJAdapter:
+        return DDJJAdapter(session_factory=session_factory)
 
     @provide  # type: ignore[untyped-decorator]
     def staff(
