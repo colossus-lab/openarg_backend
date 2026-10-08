@@ -18,9 +18,10 @@ Tres detalles que deciden si el canario mide algo:
   contra la exacta: 1,0 siempre (revisión del 05-oct, H208). Ahora
   ``search_datasets_hnsw`` recorre el grafo con el seq scan apagado, así que
   lo que se mide es el grafo. Con 1000 candidatos esas 20 consultas dan 0,915
-  en staging (05 y 07-oct), debajo del piso: el canario avisa desde la
-  primera noche, y ese aviso es el estado conocido del grafo, no una
-  degradación nueva. Lo que falta está en el grafo y lejos en el recorrido
+  en staging (05 y 07-oct) y con 400, los de ahora, 0,905 (08-oct; misma
+  banda del 90): debajo del piso, así que el canario avisa desde la primera
+  noche, y ese aviso es el estado conocido del grafo, no una degradación
+  nueva. Lo que falta está en el grafo y lejos en el recorrido
   (grupos de datasets con el mismo vector, chunks re-embebidos): con 4000 a
   8000 candidatos aparece (07-oct). Que un REINDEX acorte ese recorrido no
   está medido; ver ``detail_es`` para qué hacer con la alerta.
@@ -141,8 +142,8 @@ class CanaryReport:
             "Mide el índice solo; el buscador sirve esto mismo salvo cuando el índice trae "
             "poco o con puntaje bajo, y ahí cae a la exacta. "
             "Si es la misma alerta noche tras noche (misma banda), es el estado conocido del "
-            "grafo y no una degradación nueva: en staging, el 07-oct, estas consultas daban "
-            "0,915. Si baja de banda, algo cambió: comparar las peores con las de la noche "
+            "grafo y no una degradación nueva: en staging, el 08-oct, estas consultas daban "
+            "0,905. Si baja de banda, algo cambió: comparar las peores con las de la noche "
             "anterior en el log. Un REINDEX no está medido como arreglo: sólo con OK, "
             "primero en staging y midiendo antes y después."
         )

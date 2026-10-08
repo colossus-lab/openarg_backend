@@ -65,7 +65,8 @@ def test_detail_names_the_worst_queries() -> None:
 def test_detail_does_not_order_a_reindex() -> None:
     """Revisión del #176: el texto decía "REINDEX pendiente" y se leía como una
     orden (un REINDEX de ~1 GB en prod), cuando no está medido que arregle el
-    0,915 de staging. Dice qué significa una alerta fija y qué hacer."""
+    0,915 de staging. Dice qué significa una alerta fija y qué hacer. El estado
+    conocido es el de los 400 candidatos de ahora: 0,905 (08-oct)."""
     detail = _report(1.0, 0.0, 0.5).detail_es()
     assert "REINDEX pendiente" not in detail
     assert "REINDEX no está medido como arreglo" in detail
@@ -73,7 +74,7 @@ def test_detail_does_not_order_a_reindex() -> None:
     # Qué es una alerta que queda fija y qué una que empeora.
     assert "misma banda" in detail and "estado conocido" in detail
     assert "baja de banda" in detail
-    assert "0,915" in detail
+    assert "0,905" in detail
 
 
 def test_detail_says_what_the_alert_identity_does_with_a_fixed_band() -> None:
@@ -83,7 +84,7 @@ def test_detail_says_what_the_alert_identity_does_with_a_fixed_band() -> None:
     from app.application.quality.alerting import REOPEN_AT
 
     assert REOPEN_AT == (3, 10, 30, 100)  # lo que dice el docstring de detail_es
-    assert recall_band(0.915) == recall_band(0.90) == 90
+    assert recall_band(0.915) == recall_band(0.905) == recall_band(0.90) == 90
     assert recall_band(0.895) == 85
 
 

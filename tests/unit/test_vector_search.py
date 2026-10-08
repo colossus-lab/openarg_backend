@@ -1,11 +1,17 @@
 from __future__ import annotations
 
+import asyncio
+import logging
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
+import psycopg
 import pytest
+from sqlalchemy.exc import InternalError, OperationalError
 
 from app.infrastructure.adapters.search.pgvector_search_adapter import PgVectorSearchAdapter
+
+_ADAPTER_LOGGER = "app.infrastructure.adapters.search.pgvector_search_adapter"
 
 
 @pytest.fixture
@@ -355,40 +361,107 @@ def _row(i: int, score: float) -> SimpleNamespace:
     )
 
 
+_SESSION_TIMEOUT = "1min"  # the session's own statement_timeout in the double
+
+
+def _statement_timeout_error() -> OperationalError:
+    """What psycopg raises, wrapped by SQLAlchemy, when statement_timeout fires."""
+    return OperationalError(
+        "SELECT ... GROUP BY dc.dataset_id ...",
+        {},
+        psycopg.errors.QueryCanceled("canceling statement due to statement timeout"),
+    )
+
+
 def _scripted_session(
     extversion: str = "0.8.1",
     rows: list | None = None,
     exact_rows: list | None = None,
     seqscan: str = "on",
     walk_error: Exception | None = None,
+    exact_error: BaseException | None = None,
+    savepoint_rollback_error: Exception | None = None,
 ) -> AsyncMock:
-    """Session double that answers by statement.
+    """Session double that answers by statement, with Postgres' transaction rules.
 
     The version lookup gets ``extversion``; reading ``enable_seqscan`` gets
     ``seqscan``; the HNSW search (the one with ``LIMIT :candidates``) gets
     ``rows``, or raises ``walk_error``; the exact search (grouped over every
-    chunk) gets ``exact_rows``.
+    chunk) gets ``exact_rows``, or raises ``exact_error``.
+
+    What a statement timeout does to a transaction is modelled too, since it
+    is what the savepoint is for: a statement that fails leaves the
+    transaction aborted, and from then on every statement fails ("current
+    transaction is aborted") until a rollback. ``begin_nested`` opens a
+    savepoint; rolling it back restores ``statement_timeout`` as it was when
+    it opened and clears the aborted state (``savepoint_rollback_error``
+    makes that rollback fail instead); releasing it (``commit``) keeps what
+    was set inside, as ``SET LOCAL`` does in Postgres. ``session.state``
+    exposes the timeout and the aborted flag; ``session.events`` the
+    savepoint operations, in order with the statements' kinds.
     """
     session = AsyncMock()
+    state = {"statement_timeout": _SESSION_TIMEOUT, "aborted": False}
+    savepoints: list[dict] = []
+    events: list[str] = []
 
     async def _execute(statement, params=None):
         sql = str(statement)
+        events.append(_kind(sql))
+        if state["aborted"]:
+            raise InternalError(
+                sql,
+                params,
+                psycopg.errors.InFailedSqlTransaction("current transaction is aborted"),
+            )
         result = MagicMock()
         if "pg_extension" in sql:
             result.scalar.return_value = extversion
         elif "current_setting('enable_seqscan')" in sql:
             result.scalar.return_value = seqscan
+        elif "current_setting('statement_timeout')" in sql:
+            result.scalar.return_value = state["statement_timeout"]
+        elif "set_config('statement_timeout'" in sql:
+            state["statement_timeout"] = next(iter(params.values()))
         elif "LIMIT :candidates" in sql:
             if walk_error is not None:
+                state["aborted"] = True
                 raise walk_error
             result.fetchall.return_value = rows or []
         elif "GROUP BY dc.dataset_id" in sql:
+            if exact_error is not None:
+                state["aborted"] = True
+                raise exact_error
             result.fetchall.return_value = exact_rows or []
         else:
             result.fetchall.return_value = []
         return result
 
+    async def _begin_nested():
+        savepoints.append(dict(state))
+        events.append("savepoint")
+        savepoint = MagicMock()
+
+        async def _release():
+            if state["aborted"]:
+                raise InternalError("RELEASE SAVEPOINT", {}, Exception("transaction is aborted"))
+            savepoints.pop()
+            events.append("release")
+
+        async def _rollback_to():
+            events.append("rollback to savepoint")
+            if savepoint_rollback_error is not None:
+                raise savepoint_rollback_error
+            state.update(savepoints.pop())
+
+        savepoint.commit = AsyncMock(side_effect=_release)
+        savepoint.rollback = AsyncMock(side_effect=_rollback_to)
+        return savepoint
+
     session.execute.side_effect = _execute
+    session.begin_nested = AsyncMock(side_effect=_begin_nested)
+    session.state = state
+    session.events = events
     return session
 
 
@@ -416,6 +489,12 @@ def _kind(sql: str) -> str:
         return "seqscan off"
     if "set_config('enable_seqscan', :before, true)" in sql:
         return "seqscan como estaba"
+    if "current_setting('statement_timeout')" in sql:
+        return "lee timeout"
+    if "set_config('statement_timeout', :ms, true)" in sql:
+        return "timeout tope"
+    if "set_config('statement_timeout', :before, true)" in sql:
+        return "timeout como estaba"
     if "LIMIT :candidates" in sql:
         return "recorrido"
     if "GROUP BY dc.dataset_id" in sql:
@@ -459,18 +538,20 @@ class TestSearchDatasetsAnn:
         assert _exact_sqls(session) == []
 
     @pytest.mark.parametrize("limit", [5, 16, 20, 40, 100, 500])
-    async def test_ef_search_is_300_and_candidates_1000_whatever_the_limit(self, limit):
-        """#131 set 1000, and at 1000 the planner left the index for a parallel
-        seq scan (past ~400 on staging, ~600 on prod): brute force, 2.2 s
-        median with 8 at once on staging. The review asked for 300 or less.
-        The 1000 candidates stay: the iterative scan walks past ef_search to
-        get them, and the MCP asks for up to 100 datasets."""
+    async def test_ef_search_is_300_and_candidates_400_whatever_the_limit(self, limit):
+        """#131 set ef_search to 1000, and at 1000 the planner left the index
+        for a parallel seq scan (past ~400 on staging, ~600 on prod): brute
+        force, 2.2 s median with 8 at once on staging. The review asked for
+        300 or less. Candidates went to 1000 with #176, and on prod
+        (2026-10-08, gold set) that doubled the p95 against 300-500 with the
+        same hit@3: 400, old main's value for the agent, past ef_search so
+        the iterative scan still walks beyond the frontier."""
         session = _scripted_session(rows=[_row(i, 0.7) for i in range(limit)])
         await PgVectorSearchAdapter(session).search_datasets_ann([0.1] * 8, limit=limit)
 
         stmts = _statements(session)
         assert [p["ef"] for s, p in stmts if "hnsw.ef_search" in s] == ["300"]
-        assert _hnsw_sql(session)[1]["candidates"] == 1000
+        assert _hnsw_sql(session)[1]["candidates"] == 400
         # Set inside the transaction only, and before the search runs.
         first_set = next(s for s, _ in stmts if "set_config" in s)
         assert "set_config('hnsw.ef_search', :ef, true)" in first_set
@@ -482,7 +563,7 @@ class TestSearchDatasetsAnn:
         assert PgVectorSearchAdapter._ANN_CANDIDATES > PgVectorSearchAdapter._ANN_EF_SEARCH
 
     async def test_iterative_scan_is_on_without_a_portal_too(self):
-        """Without a portal it is what brings candidates 301 to 1000."""
+        """Without a portal it is what brings candidates 301 to 400."""
         session = _scripted_session(rows=_GOOD)
         await PgVectorSearchAdapter(session).search_datasets_ann([0.1] * 8, limit=20)
 
@@ -525,7 +606,8 @@ class TestSearchDatasetsAnn:
         await PgVectorSearchAdapter(session).search_datasets_ann([0.1] * 8, limit=20)
 
         kinds = [_kind(s) for s, _ in _statements(session)]
-        assert kinds[-3:] == ["recorrido", "seqscan como estaba", "exacta"]
+        assert kinds.index("seqscan como estaba") < kinds.index("exacta")
+        assert kinds.index("recorrido") < kinds.index("seqscan como estaba")
 
     async def test_a_failed_walk_leaves_the_setting_to_the_rollback(self):
         """After a failed statement the transaction only accepts a rollback,
@@ -618,6 +700,10 @@ class TestSearchDatasetsAnn:
         [(sql, params)] = _exact_sqls(session)
         assert params["portal"] == "caba"
         assert params["limit"] == 7
+        # There the exact search is the answer, not a second opinion: no
+        # ceiling, which would turn a slow answer into none.
+        assert "savepoint" not in session.events
+        assert not any("statement_timeout" in s for s, _ in stmts)
 
     async def test_without_iterative_scan_and_without_portal_the_index_still_answers(self):
         session = _scripted_session(extversion="0.7.4", rows=_GOOD)
@@ -625,7 +711,7 @@ class TestSearchDatasetsAnn:
 
         sqls = [s for s, _ in _statements(session)]
         assert not any("iterative_scan" in s for s in sqls)
-        assert _hnsw_sql(session)[1]["candidates"] == 1000
+        assert _hnsw_sql(session)[1]["candidates"] == 400
 
     async def test_pgvector_version_is_read_once_per_process(self):
         adapter_a = PgVectorSearchAdapter(_scripted_session(rows=_GOOD))
@@ -652,6 +738,171 @@ class TestSearchDatasetsAnn:
         r = results[0]
         assert (r.dataset_id, r.portal, r.score) == ("abc-123", "datos_gob_ar", 0.674)
         assert (r.description, r.download_url, r.columns) == ("", "", "")
+
+
+# A trapped walk as prod's gold set saw it on 2026-10-08: full, top 0.489-0.540.
+_WEAK = [_row(100 + i, 0.52 - i * 0.001) for i in range(20)]
+_EXACT = [_row(i, 0.675 - i * 0.001) for i in range(20)]
+
+
+class TestExactFallbackCap:
+    """The exact search behind the index runs under a ceiling, in a savepoint.
+
+    Prod, 2026-10-08: the fallback took 0.8-1 s warm and 13 s cold, and
+    improved the top in 1 of 4 queries. Past the ceiling the index's hits are
+    served, and the transaction (which the agent shares across a whole turn)
+    must come out of it usable and without the ceiling set."""
+
+    @pytest.fixture(autouse=True)
+    def _fresh_version_cache(self, monkeypatch):
+        monkeypatch.setattr(PgVectorSearchAdapter, "_pgvector_version", None)
+
+    async def test_under_the_cap_the_exact_search_is_served_as_before(self):
+        session = _scripted_session(rows=_WEAK, exact_rows=_EXACT)
+
+        results = await PgVectorSearchAdapter(session).search_datasets_ann([0.1] * 8, limit=20)
+
+        assert [r.dataset_id for r in results] == [r.dataset_id for r in _EXACT]
+        assert session.events[-6:] == [
+            "savepoint",
+            "lee timeout",
+            "timeout tope",
+            "exacta",
+            "timeout como estaba",
+            "release",
+        ]
+        caps = [p for s, p in _statements(session) if _kind(s) == "timeout tope"]
+        assert caps == [{"ms": "1500"}]
+
+    async def test_under_the_cap_the_timeout_is_put_back_before_the_release(self):
+        """A released savepoint keeps its SET LOCAL until the transaction
+        ends: without putting it back, the rest of the agent's turn would run
+        every statement under 1.5 s."""
+        session = _scripted_session(rows=_WEAK, exact_rows=_EXACT)
+
+        await PgVectorSearchAdapter(session).search_datasets_ann([0.1] * 8, limit=20)
+
+        restores = [p for s, p in _statements(session) if _kind(s) == "timeout como estaba"]
+        assert restores == [{"before": _SESSION_TIMEOUT}]
+        assert session.state == {"statement_timeout": _SESSION_TIMEOUT, "aborted": False}
+
+    async def test_past_the_cap_the_index_hits_are_served(self, caplog):
+        session = _scripted_session(rows=_WEAK, exact_error=_statement_timeout_error())
+
+        with caplog.at_level(logging.INFO, logger=_ADAPTER_LOGGER):
+            results = await PgVectorSearchAdapter(session).search_datasets_ann([0.1] * 8, limit=20)
+
+        assert [r.dataset_id for r in results] == [r.dataset_id for r in _WEAK]
+        [record] = [r for r in caplog.records if "hnsw→exacta" in r.getMessage()]
+        assert record.levelno == logging.WARNING
+        message = record.getMessage()
+        assert "puntaje bajo" in message
+        assert "pasó el tope de 1500 ms" in message
+        assert "se sirven los hits del índice" in message
+
+    async def test_past_the_cap_the_session_stays_usable_and_without_the_cap(self):
+        session = _scripted_session(rows=_WEAK, exact_error=_statement_timeout_error())
+
+        await PgVectorSearchAdapter(session).search_datasets_ann([0.1] * 8, limit=20)
+
+        assert session.events[-5:] == [
+            "savepoint",
+            "lee timeout",
+            "timeout tope",
+            "exacta",
+            "rollback to savepoint",
+        ]
+        assert session.state == {"statement_timeout": _SESSION_TIMEOUT, "aborted": False}
+        # The turn goes on in the same transaction: the next search runs.
+        again = await PgVectorSearchAdapter(session).search_datasets_hnsw([0.1] * 8, limit=20)
+        assert [r.dataset_id for r in again] == [r.dataset_id for r in _WEAK]
+
+    async def test_control_without_the_savepoint_the_timeout_breaks_the_session(self):
+        """Control for the test above: in this double, as in Postgres, a timed
+        out statement outside a savepoint leaves the transaction aborted. If
+        it did not, the test above would pass without the savepoint."""
+        session = _scripted_session(rows=_WEAK, exact_error=_statement_timeout_error())
+        adapter = PgVectorSearchAdapter(session)
+        with pytest.raises(OperationalError):
+            await adapter.search_datasets_exact([0.1] * 8, limit=20)
+
+        with pytest.raises(InternalError, match="current transaction is aborted"):
+            await adapter.search_datasets_hnsw([0.1] * 8, limit=20)
+
+    async def test_too_few_hits_past_the_cap_serves_the_few(self):
+        """The same ceiling for "pocos": without a portal or with a big one
+        the exact search reads the same table, and a short list beats a cold
+        scan."""
+        session = _scripted_session(rows=_GOOD[:3], exact_error=_statement_timeout_error())
+
+        results = await PgVectorSearchAdapter(session).search_datasets_ann(
+            [0.1] * 8, limit=10, portal_filter="datos_gob_ar"
+        )
+
+        assert [r.dataset_id for r in results] == [r.dataset_id for r in _GOOD[:3]]
+        assert session.state["aborted"] is False
+
+    async def test_too_few_hits_under_the_cap_serves_the_exact_search(self):
+        """A small portal's exact search reads that portal's chunks and ends
+        far under the ceiling: there it still completes the list."""
+        session = _scripted_session(rows=_GOOD[:3], exact_rows=_GOOD[:10])
+
+        results = await PgVectorSearchAdapter(session).search_datasets_ann(
+            [0.1] * 8, limit=10, portal_filter="caba"
+        )
+
+        assert len(results) == 10
+        assert session.events[-1] == "release"
+
+    async def test_any_other_error_serves_the_index_hits_too(self, caplog):
+        session = _scripted_session(
+            rows=_WEAK,
+            exact_error=OperationalError("SELECT", {}, Exception("could not resize shared memory")),
+        )
+
+        with caplog.at_level(logging.WARNING, logger=_ADAPTER_LOGGER):
+            results = await PgVectorSearchAdapter(session).search_datasets_ann([0.1] * 8, limit=20)
+
+        assert [r.dataset_id for r in results] == [r.dataset_id for r in _WEAK]
+        assert session.state == {"statement_timeout": _SESSION_TIMEOUT, "aborted": False}
+        [record] = [r for r in caplog.records if "hnsw→exacta" in r.getMessage()]
+        assert "OperationalError" in record.getMessage()
+        assert "tope" not in record.getMessage()
+
+    async def test_a_failed_savepoint_rollback_is_not_hidden(self):
+        """If the rollback to the savepoint fails the connection is gone:
+        serving the index's hits would hand the next query of the turn a
+        transaction nobody can use. The error goes to the caller, whose
+        ``reset`` rolls back, as for any failed search."""
+        session = _scripted_session(
+            rows=_WEAK,
+            exact_error=_statement_timeout_error(),
+            savepoint_rollback_error=OperationalError(
+                "ROLLBACK TO SAVEPOINT", {}, Exception("server closed the connection")
+            ),
+        )
+
+        with pytest.raises(OperationalError, match="server closed the connection"):
+            await PgVectorSearchAdapter(session).search_datasets_ann([0.1] * 8, limit=20)
+
+    async def test_a_cancellation_is_not_swallowed(self):
+        """The agent's tool timeout cancels the task: that must reach the
+        caller (which rolls back), not come out as the index's hits."""
+        session = _scripted_session(rows=_WEAK, exact_error=asyncio.CancelledError())
+
+        with pytest.raises(asyncio.CancelledError):
+            await PgVectorSearchAdapter(session).search_datasets_ann([0.1] * 8, limit=20)
+
+        assert "rollback to savepoint" not in session.events
+        assert "release" not in session.events
+
+    async def test_a_trusted_answer_opens_no_savepoint(self):
+        session = _scripted_session(rows=_GOOD[:10])
+
+        await PgVectorSearchAdapter(session).search_datasets_ann([0.1] * 8, limit=10)
+
+        session.begin_nested.assert_not_awaited()
+        assert not any("statement_timeout" in s for s, _ in _statements(session))
 
 
 class TestKnownPortals:
