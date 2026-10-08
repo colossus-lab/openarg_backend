@@ -9,14 +9,26 @@ from uuid import uuid4
 import pytest
 from fastapi import HTTPException
 
+from app.application.answers.engine import EngineResult
 from app.application.api_key_service import (
     CATALOG_MINUTE_LIMIT,
+    DAILY_CAPACITY_DETAIL,
     PLAN_LIMITS,
+    QUOTA_SERVICE_DOWN_DETAIL,
+    REPLAY_PER_MIN,
+    answer_is_billable,
+    answer_used_model,
+    charged_counter_key,
     check_catalog_rate_limit,
-    check_rate_limit,
+    check_question_rate,
+    check_replay_rate,
     generate_api_key,
     global_free_daily_cap,
     hash_api_key,
+    replay_per_min,
+    reserve_question,
+    seconds_until_utc_midnight,
+    settle_question,
     verify_api_key,
 )
 from app.application.public_quota import (
@@ -131,6 +143,8 @@ class FakeCache:
     def __init__(self) -> None:
         self.counters: dict[str, int] = {}
         self.ttls: dict[str, int] = {}
+        # Segundos que le quedan a cada clave, si el test los fija.
+        self.remaining: dict[str, int] = {}
         self.down = False
 
     async def increment_with_ttl(self, key: str, ttl_seconds: int) -> int:
@@ -139,6 +153,37 @@ class FakeCache:
         self.counters[key] = self.counters.get(key, 0) + 1
         self.ttls.setdefault(key, ttl_seconds)  # EXPIRE NX
         return self.counters[key]
+
+    async def decrement(self, key: str) -> int:
+        """Como el script de Redis: no crea la clave ni baja de 0."""
+        if self.down:
+            raise ConnectionError("redis down")
+        if self.counters.get(key, 0) <= 0:
+            return self.counters.get(key, 0)
+        self.counters[key] -= 1
+        return self.counters[key]
+
+    async def get(self, key: str) -> int | None:
+        if self.down:
+            raise ConnectionError("redis down")
+        return self.counters.get(key)
+
+    async def exists(self, key: str) -> bool:
+        if self.down:
+            raise ConnectionError("redis down")
+        return key in self.counters
+
+    async def set_if_absent(self, key: str, value: str, ttl_seconds: int) -> bool:
+        if self.down:
+            raise ConnectionError("redis down")
+        if key in self.counters:
+            return False
+        self.counters[key] = int(value)
+        self.ttls[key] = ttl_seconds
+        return True
+
+    async def ttl(self, key: str) -> int | None:
+        return self.remaining.get(key)
 
 
 class FakeCredits:
@@ -193,8 +238,34 @@ def _month_key(user_id: object, tipo: str = "preguntas") -> str:
     return monthly_counter_key(user_id, tipo)  # type: ignore[arg-type]
 
 
+def _month_used(cache: FakeCache, user_id: object, n: int) -> None:
+    """El mes con `n` preguntas cobradas: reservas y cobradas en `n`."""
+    cache.counters[_month_key(user_id)] = n
+    cache.counters[charged_counter_key(user_id)] = n
+
+
 def _free_key() -> ApiKey:
     return ApiKey(id=uuid4(), user_id=uuid4(), plan="free", is_active=True)
+
+
+async def _admit(
+    api_key: ApiKey,
+    cache: FakeCache,
+    client_ip: str = "",
+    credits: FakeCredits | None = None,
+) -> dict:
+    """Una pregunta que pasa los controles y termina cobrada: reservar + cobrar.
+
+    Los tests de los controles (orden, topes, 402/429/503) usan esto; los del
+    cobro al terminar usan `reserve_question` y `settle_question` por separado.
+    """
+    reservation = await reserve_question(
+        api_key,
+        cache,  # type: ignore[arg-type]
+        client_ip=client_ip,
+        credits=credits,  # type: ignore[arg-type]
+    )
+    return await settle_question(reservation, cache, credits, charge=True)  # type: ignore[arg-type]
 
 
 @pytest.fixture(autouse=True)
@@ -206,6 +277,7 @@ def _default_quotas(monkeypatch: pytest.MonkeyPatch) -> None:
         "PUBLIC_API_FOUNDER_DATOS",
         "PUBLIC_API_GLOBAL_DAILY_CAP",
         "PUBLIC_API_IP_DAILY_LIMIT",
+        "PUBLIC_API_USER_UNBILLED_DAILY_LIMIT",
     ):
         monkeypatch.delenv(name, raising=False)
 
@@ -221,7 +293,7 @@ class TestRateLimit:
 
     @pytest.mark.asyncio
     async def test_first_request_allowed(self, free_key: ApiKey, cache: FakeCache) -> None:
-        result = await check_rate_limit(free_key, cache, client_ip="1.2.3.4")  # type: ignore[arg-type]
+        result = await _admit(free_key, cache, client_ip="1.2.3.4")  # type: ignore[arg-type]
         assert result["remaining_minute"] == PLAN_LIMITS["free"]["per_min"] - 1
         assert result["remaining_month"] == 9
         assert result["limit_month"] == 10
@@ -236,9 +308,9 @@ class TestRateLimit:
     @pytest.mark.asyncio
     async def test_minute_limit_exceeded(self, free_key: ApiKey, cache: FakeCache) -> None:
         for _ in range(PLAN_LIMITS["free"]["per_min"]):
-            await check_rate_limit(free_key, cache)  # type: ignore[arg-type]
+            await _admit(free_key, cache)  # type: ignore[arg-type]
         with pytest.raises(HTTPException) as exc_info:
-            await check_rate_limit(free_key, cache)  # type: ignore[arg-type]
+            await _admit(free_key, cache)  # type: ignore[arg-type]
         assert exc_info.value.status_code == 429
         assert "minute" in exc_info.value.detail
 
@@ -248,9 +320,9 @@ class TestRateLimit:
     ) -> None:
         per_min = PLAN_LIMITS["free"]["per_min"]
         for _ in range(per_min):
-            await check_rate_limit(free_key, cache)  # type: ignore[arg-type]
+            await _admit(free_key, cache)  # type: ignore[arg-type]
         with pytest.raises(HTTPException):
-            await check_rate_limit(free_key, cache)  # type: ignore[arg-type]
+            await _admit(free_key, cache)  # type: ignore[arg-type]
         assert cache.counters[_month_key(free_key.user_id)] == per_min
 
     @pytest.mark.asyncio
@@ -259,7 +331,7 @@ class TestRateLimit:
     ) -> None:
         cache.counters[_month_key(free_key.user_id)] = 10
         with pytest.raises(HTTPException) as exc_info:
-            await check_rate_limit(free_key, cache, credits=FakeCredits())  # type: ignore[arg-type]
+            await _admit(free_key, cache, credits=FakeCredits())  # type: ignore[arg-type]
         assert exc_info.value.status_code == 402
         assert exc_info.value.detail == "Monthly quota exceeded: 10 questions per month"
         assert exc_info.value.headers["X-Quota-Reset"].endswith("+00:00")
@@ -272,7 +344,7 @@ class TestRateLimit:
         """Si no, cada reintento de alguien sin cupo le comería lugar a los demás."""
         cache.counters[_month_key(free_key.user_id)] = 10
         with pytest.raises(HTTPException):
-            await check_rate_limit(free_key, cache, client_ip="1.1.1.1")  # type: ignore[arg-type]
+            await _admit(free_key, cache, client_ip="1.1.1.1")  # type: ignore[arg-type]
         assert f"rl:global:free:day:{_today()}" not in cache.counters
         assert f"rl:ip:1.1.1.1:day:{_today()}" not in cache.counters
 
@@ -283,12 +355,12 @@ class TestRateLimit:
         credits = FakeCredits(preguntas=2)
         for _ in range(2):  # dentro del cupo: no toca créditos
             cache.counters.pop(f"rl:user:{free_key.user_id}:min", None)
-            result = await check_rate_limit(free_key, cache, credits=credits)  # type: ignore[arg-type]
+            result = await _admit(free_key, cache, credits=credits)  # type: ignore[arg-type]
             assert result["used_credit"] is False
         assert credits.debits == []
-        cache.counters[_month_key(free_key.user_id)] = 10
+        _month_used(cache, free_key.user_id, 10)
         cache.counters.pop(f"rl:user:{free_key.user_id}:min", None)
-        result = await check_rate_limit(free_key, cache, credits=credits)  # type: ignore[arg-type]
+        result = await _admit(free_key, cache, credits=credits)  # type: ignore[arg-type]
         assert result["used_credit"] is True
         assert credits.saldo["preguntas"] == 1
 
@@ -301,7 +373,7 @@ class TestRateLimit:
         cache.counters[_month_key(free_key.user_id)] = 10
         credits = FakeCredits(preguntas=1)
         with pytest.raises(HTTPException) as exc_info:
-            await check_rate_limit(free_key, cache, credits=credits)  # type: ignore[arg-type]
+            await _admit(free_key, cache, credits=credits)  # type: ignore[arg-type]
         assert exc_info.value.status_code == 503
         assert credits.saldo["preguntas"] == 1
 
@@ -311,7 +383,7 @@ class TestRateLimit:
     ) -> None:
         until = datetime(2027, 3, 31, 23, 59, tzinfo=UTC)
         cache.counters[_month_key(free_key.user_id)] = 50
-        result = await check_rate_limit(
+        result = await _admit(
             free_key,
             cache,
             credits=FakeCredits(founder_until=until),  # type: ignore[arg-type]
@@ -325,7 +397,7 @@ class TestRateLimit:
     async def test_founder_quota_in_the_402(self, free_key: ApiKey, cache: FakeCache) -> None:
         cache.counters[_month_key(free_key.user_id)] = 100
         with pytest.raises(HTTPException) as exc_info:
-            await check_rate_limit(
+            await _admit(
                 free_key,
                 cache,
                 credits=FakeCredits(founder=True),  # type: ignore[arg-type]
@@ -338,21 +410,21 @@ class TestRateLimit:
     ) -> None:
         credits = FakeCredits(founder=True)
         credits.broken = True
-        result = await check_rate_limit(free_key, cache, credits=credits)  # type: ignore[arg-type]
+        result = await _admit(free_key, cache, credits=credits)  # type: ignore[arg-type]
         assert result["tier"] == "gratis"
 
     @pytest.mark.asyncio
     async def test_monthly_counter_is_per_person_and_lasts_the_month(
         self, free_key: ApiKey, cache: FakeCache
     ) -> None:
-        await check_rate_limit(free_key, cache)  # type: ignore[arg-type]
+        await _admit(free_key, cache)  # type: ignore[arg-type]
         key = _month_key(free_key.user_id)
         assert str(free_key.user_id) in key and datetime.now(UTC).strftime("%Y-%m") in key
         assert cache.ttls[key] == MONTH_TTL
         # Otra clave de la misma persona comparte el cupo.
         other = ApiKey(id=uuid4(), user_id=free_key.user_id, plan="free", is_active=True)
         cache.counters.pop(f"rl:user:{free_key.user_id}:min", None)
-        await check_rate_limit(other, cache)  # type: ignore[arg-type]
+        await _admit(other, cache)  # type: ignore[arg-type]
         assert cache.counters[key] == 2
 
     @pytest.mark.asyncio
@@ -360,12 +432,12 @@ class TestRateLimit:
         self, free_key: ApiKey, cache: FakeCache, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setenv("PUBLIC_API_IP_DAILY_LIMIT", "1")
-        await check_rate_limit(free_key, cache, client_ip="9.9.9.9")  # type: ignore[arg-type]
+        await _admit(free_key, cache, client_ip="9.9.9.9")  # type: ignore[arg-type]
         with pytest.raises(HTTPException) as exc_info:
-            await check_rate_limit(_free_key(), cache, client_ip="9.9.9.9")  # type: ignore[arg-type]
+            await _admit(_free_key(), cache, client_ip="9.9.9.9")  # type: ignore[arg-type]
         assert exc_info.value.status_code == 429
         # Otra IP no comparte el bucket.
-        await check_rate_limit(_free_key(), cache, client_ip="8.8.8.8")  # type: ignore[arg-type]
+        await _admit(_free_key(), cache, client_ip="8.8.8.8")  # type: ignore[arg-type]
 
     @pytest.mark.asyncio
     async def test_global_cap_from_env_returns_503(
@@ -373,9 +445,9 @@ class TestRateLimit:
     ) -> None:
         monkeypatch.setenv("PUBLIC_API_GLOBAL_DAILY_CAP", "3")
         for _ in range(3):
-            await check_rate_limit(_free_key(), cache)  # type: ignore[arg-type]
+            await _admit(_free_key(), cache)  # type: ignore[arg-type]
         with pytest.raises(HTTPException) as exc_info:
-            await check_rate_limit(_free_key(), cache)  # type: ignore[arg-type]
+            await _admit(_free_key(), cache)  # type: ignore[arg-type]
         assert exc_info.value.status_code == 503
 
     @pytest.mark.asyncio
@@ -384,14 +456,14 @@ class TestRateLimit:
     ) -> None:
         cache.down = True
         with pytest.raises(HTTPException) as exc_info:
-            await check_rate_limit(free_key, cache)  # type: ignore[arg-type]
+            await _admit(free_key, cache)  # type: ignore[arg-type]
         assert exc_info.value.status_code == 503
 
     @pytest.mark.asyncio
     async def test_paid_plan_fails_open_when_cache_is_down(self, cache: FakeCache) -> None:
         cache.down = True
         pro_key = ApiKey(id=uuid4(), user_id=uuid4(), plan="pro", is_active=True)
-        result = await check_rate_limit(pro_key, cache)  # type: ignore[arg-type]
+        result = await _admit(pro_key, cache)  # type: ignore[arg-type]
         assert result["remaining_month"] == 10
 
     def test_invalid_env_falls_back_to_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -419,7 +491,7 @@ class TestRateLimit:
         assert exc_info.value.status_code == 402
         assert exc_info.value.detail == "Monthly quota exceeded: 3 catalog requests per month"
         # Las preguntas no se tocaron.
-        result = await check_rate_limit(free_key, cache)  # type: ignore[arg-type]
+        result = await _admit(free_key, cache)  # type: ignore[arg-type]
         assert result["remaining_month"] == 9
 
     @pytest.mark.asyncio
@@ -443,6 +515,577 @@ class TestRateLimit:
             await check_catalog_rate_limit(free_key, cache)  # type: ignore[arg-type]
         assert exc_info.value.status_code == 429
         assert "per minute" in exc_info.value.detail
+
+    @pytest.mark.asyncio
+    async def test_retry_after_is_what_is_left_of_the_minute(
+        self, free_key: ApiKey, cache: FakeCache
+    ) -> None:
+        """QW10: era 60 fijo, aunque la ventana se abriera en 5 segundos.
+
+        Vale para los tres límites por minuto: preguntas, repeticiones de una
+        pregunta ya respondida (cada uno con el TTL de SU contador) y datos.
+        """
+        user = free_key.user_id
+        cache.remaining = {
+            f"rl:user:{user}:min": 23,
+            f"rl:user:{user}:replay:min": 41,
+            f"rl:user:{user}:catalog:min": 7,
+        }
+        cache.counters[f"rl:user:{user}:min"] = PLAN_LIMITS["free"]["per_min"]
+        cache.counters[f"rl:user:{user}:replay:min"] = REPLAY_PER_MIN
+        cache.counters[f"rl:user:{user}:catalog:min"] = CATALOG_MINUTE_LIMIT
+        with pytest.raises(HTTPException) as preguntas:
+            await check_question_rate(free_key, cache)  # type: ignore[arg-type]
+        with pytest.raises(HTTPException) as repeticiones:
+            await check_replay_rate(free_key, cache)  # type: ignore[arg-type]
+        with pytest.raises(HTTPException) as datos:
+            await check_catalog_rate_limit(free_key, cache)  # type: ignore[arg-type]
+        assert preguntas.value.headers["Retry-After"] == "23"
+        assert repeticiones.value.headers["Retry-After"] == "41"
+        assert datos.value.headers["Retry-After"] == "7"
+
+    @pytest.mark.asyncio
+    async def test_reserve_question_carries_the_real_retry_after(
+        self, free_key: ApiKey, cache: FakeCache
+    ) -> None:
+        """`/ask` llega al límite por minuto vía `reserve_question` (#137): el
+        429 sale con el TTL real y sin reservar nada del mes."""
+        key = f"rl:user:{free_key.user_id}:min"
+        cache.remaining = {key: 12}
+        cache.counters[key] = PLAN_LIMITS["free"]["per_min"]
+        with pytest.raises(HTTPException) as exc_info:
+            await reserve_question(free_key, cache)  # type: ignore[arg-type]
+        assert exc_info.value.status_code == 429
+        assert exc_info.value.headers["Retry-After"] == "12"
+        assert _month_key(free_key.user_id) not in cache.counters
+
+    @pytest.mark.asyncio
+    async def test_retry_after_in_the_last_second_is_one_not_sixty(
+        self, free_key: ApiKey, cache: FakeCache
+    ) -> None:
+        """Redis redondea: una clave que vence en este segundo tiene TTL 0."""
+        key = f"rl:user:{free_key.user_id}:catalog:min"
+        cache.remaining = {key: 0}
+        cache.counters[key] = CATALOG_MINUTE_LIMIT
+        with pytest.raises(HTTPException) as exc_info:
+            await check_catalog_rate_limit(free_key, cache)  # type: ignore[arg-type]
+        assert exc_info.value.headers["Retry-After"] == "1"
+
+    @pytest.mark.asyncio
+    async def test_retry_after_falls_back_to_the_whole_minute(
+        self, free_key: ApiKey, cache: FakeCache
+    ) -> None:
+        cache.counters[f"rl:user:{free_key.user_id}:catalog:min"] = CATALOG_MINUTE_LIMIT
+        with pytest.raises(HTTPException) as exc_info:
+            await check_catalog_rate_limit(free_key, cache)  # type: ignore[arg-type]
+        assert exc_info.value.headers["Retry-After"] == "60"
+
+
+class TestChargeOnlyWhenAnswered:
+    """La pregunta se reserva al entrar y se cobra sólo si la respuesta cuenta.
+
+    Antes `check_rate_limit` hacía el INCR del mes al entrar y nada lo
+    devolvía: un timeout, un error, un saludo o un acierto del caché costaban
+    1 de 10.
+    """
+
+    @pytest.fixture
+    def free_key(self) -> ApiKey:
+        return _free_key()
+
+    @pytest.fixture
+    def cache(self) -> FakeCache:
+        return FakeCache()
+
+    async def _reserve(self, key: ApiKey, cache: FakeCache, **kw: object):  # type: ignore[no-untyped-def]
+        return await reserve_question(key, cache, **kw)  # type: ignore[arg-type]
+
+    @pytest.mark.asyncio
+    async def test_not_charged_gives_the_question_back(
+        self, free_key: ApiKey, cache: FakeCache
+    ) -> None:
+        reservation = await self._reserve(free_key, cache)
+        assert cache.counters[_month_key(free_key.user_id)] == 1  # reservada
+        info = await settle_question(reservation, cache, charge=False)  # type: ignore[arg-type]
+        assert cache.counters[_month_key(free_key.user_id)] == 0
+        assert info["remaining_month"] == 10
+        assert info["remaining_day"] == 10  # el nombre viejo, mismo valor
+        assert info["used_credit"] is False
+
+    @pytest.mark.asyncio
+    async def test_charged_keeps_the_reservation(self, free_key: ApiKey, cache: FakeCache) -> None:
+        reservation = await self._reserve(free_key, cache)
+        info = await settle_question(reservation, cache, charge=True)  # type: ignore[arg-type]
+        assert cache.counters[_month_key(free_key.user_id)] == 1
+        assert info["remaining_month"] == 9
+
+    @pytest.mark.asyncio
+    async def test_settle_is_idempotent(self, free_key: ApiKey, cache: FakeCache) -> None:
+        reservation = await self._reserve(free_key, cache)
+        await settle_question(reservation, cache, charge=False)  # type: ignore[arg-type]
+        await settle_question(reservation, cache, charge=False)  # type: ignore[arg-type]
+        assert cache.counters[_month_key(free_key.user_id)] == 0
+        assert reservation.settled
+
+    @pytest.mark.asyncio
+    async def test_ip_rejection_gives_the_month_back(
+        self, cache: FakeCache, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Antes el 429 por IP saltaba después del INCR del mes y lo perdía."""
+        monkeypatch.setenv("PUBLIC_API_IP_DAILY_LIMIT", "1")
+        await _admit(_free_key(), cache, client_ip="9.9.9.9")
+        other = _free_key()
+        with pytest.raises(HTTPException) as exc_info:
+            await self._reserve(other, cache, client_ip="9.9.9.9")
+        assert exc_info.value.status_code == 429
+        assert cache.counters[_month_key(other.user_id)] == 0
+        assert cache.counters[f"rl:ip:9.9.9.9:day:{_today()}"] == 1
+
+    @pytest.mark.asyncio
+    async def test_global_cap_rejection_gives_month_and_ip_back(
+        self, free_key: ApiKey, cache: FakeCache, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("PUBLIC_API_GLOBAL_DAILY_CAP", "1")
+        cache.counters[f"rl:global:free:day:{_today()}"] = 1
+        with pytest.raises(HTTPException) as exc_info:
+            await self._reserve(free_key, cache, client_ip="7.7.7.7")
+        assert exc_info.value.status_code == 503
+        assert exc_info.value.detail == DAILY_CAPACITY_DETAIL
+        assert cache.counters[_month_key(free_key.user_id)] == 0
+        assert cache.counters[f"rl:ip:7.7.7.7:day:{_today()}"] == 0
+        assert cache.counters[f"rl:global:free:day:{_today()}"] == 1
+
+    @pytest.mark.asyncio
+    async def test_402_gives_the_reservation_back(self, free_key: ApiKey, cache: FakeCache) -> None:
+        cache.counters[_month_key(free_key.user_id)] = 10
+        with pytest.raises(HTTPException) as exc_info:
+            await self._reserve(free_key, cache, credits=FakeCredits())
+        assert exc_info.value.status_code == 402
+        # Antes cada reintento lo subía (11, 12, …): el contador era de intentos.
+        assert cache.counters[_month_key(free_key.user_id)] == 10
+
+    @pytest.mark.asyncio
+    async def test_cache_down_503_is_not_the_daily_cap(
+        self, free_key: ApiKey, cache: FakeCache
+    ) -> None:
+        cache.down = True
+        with pytest.raises(HTTPException) as exc_info:
+            await self._reserve(free_key, cache)
+        assert exc_info.value.status_code == 503
+        assert exc_info.value.detail == QUOTA_SERVICE_DOWN_DETAIL
+        assert exc_info.value.headers["Retry-After"] == "300"
+
+    def test_the_two_503_details_are_told_apart_by_the_mcp(self) -> None:
+        """El MCP distingue los dos 503 por el `detail` (ver mcp_publico/core.py)."""
+        from mcp_publico import core
+
+        down = core.error_message(503, QUOTA_SERVICE_DOWN_DETAIL)
+        cap = core.error_message(503, DAILY_CAPACITY_DETAIL)
+        assert "no responde" in down and "agotado" not in down
+        assert "agotado" in cap
+
+    @pytest.mark.asyncio
+    async def test_two_at_once_with_one_question_left(
+        self, free_key: ApiKey, cache: FakeCache
+    ) -> None:
+        """La carrera: con 1 restante, el INCR atómico deja entrar a uno solo."""
+        cache.counters[_month_key(free_key.user_id)] = 9
+        other_key = ApiKey(id=uuid4(), user_id=free_key.user_id, plan="free", is_active=True)
+        first = await self._reserve(free_key, cache, credits=FakeCredits())
+        with pytest.raises(HTTPException) as exc_info:
+            await self._reserve(other_key, cache, credits=FakeCredits())
+        assert exc_info.value.status_code == 402
+        assert cache.counters[_month_key(free_key.user_id)] == 10
+        # El que entró termina sin cobrarse (p. ej. un timeout): la pregunta
+        # vuelve a estar disponible para el próximo pedido.
+        await settle_question(first, cache, charge=False)  # type: ignore[arg-type]
+        assert cache.counters[_month_key(free_key.user_id)] == 9
+        cache.counters.pop(f"rl:user:{free_key.user_id}:min", None)
+        again = await self._reserve(other_key, cache, credits=FakeCredits())
+        assert not again.needs_credit
+
+    @pytest.mark.asyncio
+    async def test_credit_is_spent_only_when_charged(
+        self, free_key: ApiKey, cache: FakeCache
+    ) -> None:
+        cache.counters[_month_key(free_key.user_id)] = 10
+        credits = FakeCredits(preguntas=1)
+        reservation = await self._reserve(free_key, cache, credits=credits)
+        assert reservation.needs_credit
+        assert credits.saldo["preguntas"] == 1  # al entrar sólo se verifica
+        await settle_question(reservation, cache, credits, charge=False)  # type: ignore[arg-type]
+        assert credits.saldo["preguntas"] == 1
+        assert cache.counters[_month_key(free_key.user_id)] == 10
+
+        cache.counters.pop(f"rl:user:{free_key.user_id}:min", None)
+        reservation = await self._reserve(free_key, cache, credits=credits)
+        info = await settle_question(reservation, cache, credits, charge=True)  # type: ignore[arg-type]
+        assert info["used_credit"] is True
+        assert credits.saldo["preguntas"] == 0
+
+    @pytest.mark.asyncio
+    async def test_last_credit_race_is_a_bounded_overdraft(
+        self, free_key: ApiKey, cache: FakeCache
+    ) -> None:
+        """Con 1 crédito, dos pedidos simultáneos entran; el segundo débito falla
+        y esa respuesta sale sin cobrarse (documentado en api_key_service)."""
+        cache.counters[_month_key(free_key.user_id)] = 10
+        credits = FakeCredits(preguntas=1)
+        a = await self._reserve(free_key, cache, credits=credits)
+        b = await self._reserve(free_key, cache, credits=credits)
+        info_a = await settle_question(a, cache, credits, charge=True)  # type: ignore[arg-type]
+        info_b = await settle_question(b, cache, credits, charge=True)  # type: ignore[arg-type]
+        assert (info_a["used_credit"], info_b["used_credit"]) == (True, False)
+        assert credits.saldo["preguntas"] == 0
+
+    @pytest.mark.asyncio
+    async def test_turn_without_model_gives_ip_and_global_back(
+        self, free_key: ApiKey, cache: FakeCache
+    ) -> None:
+        reservation = await self._reserve(free_key, cache, client_ip="5.5.5.5")
+        await settle_question(reservation, cache, charge=False, used_model=False)  # type: ignore[arg-type]
+        assert cache.counters[f"rl:ip:5.5.5.5:day:{_today()}"] == 0
+        assert cache.counters[f"rl:global:free:day:{_today()}"] == 0
+
+    @pytest.mark.asyncio
+    async def test_timeout_keeps_ip_and_global_counted(
+        self, free_key: ApiKey, cache: FakeCache
+    ) -> None:
+        """El modelo corrió y Bedrock cobró: el techo de gasto lo cuenta igual."""
+        reservation = await self._reserve(free_key, cache, client_ip="5.5.5.5")
+        await settle_question(reservation, cache, charge=False, used_model=True)  # type: ignore[arg-type]
+        assert cache.counters[_month_key(free_key.user_id)] == 0
+        assert cache.counters[f"rl:ip:5.5.5.5:day:{_today()}"] == 1
+        assert cache.counters[f"rl:global:free:day:{_today()}"] == 1
+
+    @pytest.mark.asyncio
+    async def test_minute_is_never_given_back(self, free_key: ApiKey, cache: FakeCache) -> None:
+        reservation = await self._reserve(free_key, cache)
+        await settle_question(reservation, cache, charge=False, used_model=False)  # type: ignore[arg-type]
+        assert cache.counters[f"rl:user:{free_key.user_id}:min"] == 1
+
+
+class TestCreditIsDecidedWhenCharged:
+    """Si una respuesta gasta un crédito se decide al cobrar, con el contador
+    de respuestas cobradas del mes, no al reservar.
+
+    Antes `needs_credit` se decidía al reservar, contando reservas en curso
+    que después podían devolverse: con 9 de 10 usadas, A reservaba el 10 y B
+    el 11; si A terminaba en timeout, B gastaba un crédito igual aunque el
+    lugar 10 había quedado libre (cobro doble: lugar del mes más crédito).
+    """
+
+    def _pro(self, user_id: object) -> ApiKey:
+        # Plan pro: el límite por minuto (30) no se mete en estas carreras.
+        return ApiKey(id=uuid4(), user_id=user_id, plan="pro", is_active=True)  # type: ignore[arg-type]
+
+    async def _reserve(self, key: ApiKey, cache: FakeCache, credits: FakeCredits):  # type: ignore[no-untyped-def]
+        return await reserve_question(key, cache, credits=credits)  # type: ignore[arg-type]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("b_finishes_first", [True, False], ids=["B-antes", "A-antes"])
+    async def test_a_freed_slot_is_not_paid_with_a_credit(self, b_finishes_first: bool) -> None:
+        cache, user, credits = FakeCache(), uuid4(), FakeCredits(preguntas=3)
+        _month_used(cache, user, 9)
+        a = await self._reserve(self._pro(user), cache, credits)
+        b = await self._reserve(self._pro(user), cache, credits)
+        assert not a.needs_credit and b.needs_credit  # B pasó el control de saldo
+        if b_finishes_first:  # lo típico: A es la lenta que termina en timeout
+            info = await settle_question(b, cache, credits, charge=True)  # type: ignore[arg-type]
+            await settle_question(a, cache, credits, charge=False)  # type: ignore[arg-type]
+        else:
+            await settle_question(a, cache, credits, charge=False)  # type: ignore[arg-type]
+            info = await settle_question(b, cache, credits, charge=True)  # type: ignore[arg-type]
+        assert info["used_credit"] is False
+        assert credits.saldo["preguntas"] == 3
+        assert cache.counters[_month_key(user)] == 10
+        assert cache.counters[charged_counter_key(user)] == 10
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("b_finishes_first", [True, False], ids=["B-antes", "A-antes"])
+    async def test_both_answered_spend_exactly_one_credit(self, b_finishes_first: bool) -> None:
+        cache, user, credits = FakeCache(), uuid4(), FakeCredits(preguntas=3)
+        _month_used(cache, user, 9)
+        a = await self._reserve(self._pro(user), cache, credits)
+        b = await self._reserve(self._pro(user), cache, credits)
+        order = (b, a) if b_finishes_first else (a, b)
+        used = [
+            (await settle_question(r, cache, credits, charge=True))["used_credit"]  # type: ignore[arg-type]
+            for r in order
+        ]
+        # El último en cobrarse es la respuesta 11: ésa paga el crédito.
+        assert used == [False, True]
+        assert credits.saldo["preguntas"] == 2
+
+    @pytest.mark.asyncio
+    async def test_the_month_of_the_deploy_starts_from_the_reservations(self) -> None:
+        """El mes del despliegue: las reservas de antes ya estaban cobradas."""
+        cache, user, credits = FakeCache(), uuid4(), FakeCredits(preguntas=1)
+        cache.counters[_month_key(user)] = 10  # sin contador de cobradas
+        r = await self._reserve(self._pro(user), cache, credits)
+        info = await settle_question(r, cache, credits, charge=True)  # type: ignore[arg-type]
+        assert info["used_credit"] is True
+        assert cache.counters[charged_counter_key(user)] == 11
+
+    @pytest.mark.asyncio
+    async def test_a_new_month_starts_the_charged_count_at_zero(self) -> None:
+        cache, user, credits = FakeCache(), uuid4(), FakeCredits()
+        r = await self._reserve(self._pro(user), cache, credits)
+        assert cache.counters[charged_counter_key(user)] == 0  # sembrado al reservar
+        assert cache.ttls[charged_counter_key(user)] == MONTH_TTL
+        await settle_question(r, cache, credits, charge=True)  # type: ignore[arg-type]
+        assert cache.counters[charged_counter_key(user)] == 1
+
+    @pytest.mark.asyncio
+    async def test_a_refund_never_touches_the_charged_count(self) -> None:
+        cache, user, credits = FakeCache(), uuid4(), FakeCredits()
+        _month_used(cache, user, 3)
+        r = await self._reserve(self._pro(user), cache, credits)
+        await settle_question(r, cache, credits, charge=False)  # type: ignore[arg-type]
+        assert cache.counters[charged_counter_key(user)] == 3
+
+    @pytest.mark.asyncio
+    async def test_without_redis_at_the_end_the_entry_decision_stands(self) -> None:
+        cache, user, credits = FakeCache(), uuid4(), FakeCredits(preguntas=1)
+        _month_used(cache, user, 10)
+        r = await self._reserve(self._pro(user), cache, credits)
+        cache.down = True
+        info = await settle_question(r, cache, credits, charge=True)  # type: ignore[arg-type]
+        assert info["used_credit"] is True
+
+
+def _runs_key(user_id: object) -> str:
+    return f"rl:user:{user_id}:runs:day:{_today()}"
+
+
+class TestUnbilledRunsCap:
+    """H108: tope por persona y por día de corridas del modelo que no se cobran.
+
+    Desde el cobro al terminar (#137), un timeout, un error, una aclaración o
+    una respuesta vacía devuelven la reserva del mes pero quedan contados en la
+    IP y en el tope global, porque el modelo corrió. Sin un tope por persona,
+    una sola clave gratis rotando ~10 IP llegaba a las 300 corridas del tope
+    global y dejaba sin servicio a todo el plan gratis de `/ask` y del MCP
+    hasta las 00 UTC.
+    """
+
+    async def _run(
+        self,
+        key: ApiKey,
+        cache: FakeCache,
+        client_ip: str = "",
+        credits: FakeCredits | None = None,
+        *,
+        charge: bool = False,
+        used_model: bool = True,
+    ) -> None:
+        """Una pregunta que entra y se cierra; por defecto, una corrida no cobrada."""
+        cache.counters.pop(f"rl:user:{key.user_id}:min", None)  # pasó el minuto
+        reservation = await reserve_question(
+            key,
+            cache,  # type: ignore[arg-type]
+            client_ip=client_ip,
+            credits=credits,  # type: ignore[arg-type]
+        )
+        await settle_question(
+            reservation,
+            cache,  # type: ignore[arg-type]
+            credits,  # type: ignore[arg-type]
+            charge=charge,
+            used_model=used_model,
+        )
+
+    async def _reject(self, key: ApiKey, cache: FakeCache, client_ip: str = "") -> HTTPException:
+        cache.counters.pop(f"rl:user:{key.user_id}:min", None)
+        with pytest.raises(HTTPException) as exc_info:
+            await reserve_question(key, cache, client_ip=client_ip)  # type: ignore[arg-type]
+        return exc_info.value
+
+    @pytest.mark.asyncio
+    async def test_the_21st_unbilled_run_of_the_day_is_429(self) -> None:
+        cache, key = FakeCache(), _free_key()
+        for i in range(20):
+            await self._run(key, cache, client_ip=f"10.0.0.{i % 10}")
+        exc = await self._reject(key, cache, client_ip="10.0.0.99")
+        assert exc.status_code == 429
+        assert "unbilled" in exc.detail and "20 per day" in exc.detail
+        assert exc.headers is not None
+        # Retry-After real: lo que falta para que corte el día UTC de la clave.
+        assert abs(int(exc.headers["Retry-After"]) - seconds_until_utc_midnight()) <= 2
+        # No reservó nada: ni el mes, ni la IP nueva, ni el tope global.
+        assert cache.counters[_month_key(key.user_id)] == 0
+        assert f"rl:ip:10.0.0.99:day:{_today()}" not in cache.counters
+        assert cache.counters[f"rl:global:free:day:{_today()}"] == 20
+        # Y el rechazo no se cuenta a sí mismo.
+        assert cache.counters[_runs_key(key.user_id)] == 20
+
+    @pytest.mark.asyncio
+    async def test_one_key_cannot_drain_the_shared_free_cap(self) -> None:
+        """El escenario de H108: una clave gratis con 10 IP contra el tope de 300."""
+        cache, abuser = FakeCache(), _free_key()
+        statuses: list[int] = []
+        for i in range(300):
+            cache.counters.pop(f"rl:user:{abuser.user_id}:min", None)
+            try:
+                reservation = await reserve_question(
+                    abuser,
+                    cache,  # type: ignore[arg-type]
+                    client_ip=f"10.0.0.{i % 10}",
+                )
+            except HTTPException as exc:
+                statuses.append(exc.status_code)
+                continue
+            await settle_question(reservation, cache, charge=False)  # type: ignore[arg-type]
+            statuses.append(200)
+        assert statuses[:20] == [200] * 20
+        assert set(statuses[20:]) == {429}
+        assert cache.counters[f"rl:global:free:day:{_today()}"] == 20
+        # Otra persona del plan gratis sigue teniendo servicio.
+        info = await _admit(_free_key(), cache)
+        assert info["remaining_month"] == 9
+
+    @pytest.mark.asyncio
+    async def test_charged_answers_do_not_count(self) -> None:
+        """Una respuesta cobrada la paga el cupo del mes: no es una corrida gratis."""
+        cache, key = FakeCache(), _free_key()
+        credits = FakeCredits(founder=True)  # 100 preguntas por mes
+        for _ in range(30):
+            await self._run(key, cache, credits=credits, charge=True)
+        assert cache.counters.get(_runs_key(key.user_id), 0) == 0
+        await self._run(key, cache, credits=credits)  # le quedan las 20 no cobradas
+        assert cache.counters[_runs_key(key.user_id)] == 1
+
+    @pytest.mark.asyncio
+    async def test_turns_without_the_model_do_not_count(self) -> None:
+        """Caché, saludo, bloqueo: no gastaron Bedrock, como en la IP y el tope global."""
+        cache, key = FakeCache(), _free_key()
+        for _ in range(30):
+            await self._run(key, cache, used_model=False)
+        assert cache.counters.get(_runs_key(key.user_id), 0) == 0
+
+    @pytest.mark.asyncio
+    async def test_ip_and_global_rejections_give_the_run_back(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("PUBLIC_API_IP_DAILY_LIMIT", "1")
+        cache = FakeCache()
+        await _admit(_free_key(), cache, client_ip="9.9.9.9")
+        other = _free_key()
+        assert (await self._reject(other, cache, client_ip="9.9.9.9")).status_code == 429
+        assert cache.counters[_runs_key(other.user_id)] == 0
+        monkeypatch.setenv("PUBLIC_API_GLOBAL_DAILY_CAP", "1")
+        assert (await self._reject(other, cache, client_ip="8.8.8.8")).status_code == 503
+        assert cache.counters[_runs_key(other.user_id)] == 0
+
+    @pytest.mark.asyncio
+    async def test_the_quota_service_down_503_gives_the_run_back(self) -> None:
+        class _GlobalDown(FakeCache):
+            async def increment_with_ttl(self, key: str, ttl_seconds: int) -> int:
+                if key.startswith("rl:global:"):
+                    raise ConnectionError("redis down")
+                return await super().increment_with_ttl(key, ttl_seconds)
+
+        cache, key = _GlobalDown(), _free_key()
+        exc = await self._reject(key, cache)
+        assert exc.status_code == 503 and exc.detail == QUOTA_SERVICE_DOWN_DETAIL
+        assert cache.counters[_runs_key(key.user_id)] == 0
+
+    @pytest.mark.asyncio
+    async def test_the_counter_is_per_person_and_per_utc_day(self) -> None:
+        cache, key = FakeCache(), _free_key()
+        await self._run(key, cache)
+        runs_key = _runs_key(key.user_id)
+        assert cache.counters[runs_key] == 1
+        assert cache.ttls[runs_key] == 172800  # 48 h, como los otros contadores del día
+        # Otra clave de la misma persona comparte el tope; otra persona no.
+        same_person = ApiKey(id=uuid4(), user_id=key.user_id, plan="free", is_active=True)
+        await self._run(same_person, cache)
+        await self._run(_free_key(), cache)
+        assert cache.counters[runs_key] == 2
+
+    @pytest.mark.asyncio
+    async def test_the_cap_comes_from_the_environment(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from app.application.api_key_service import unbilled_runs_daily_limit
+
+        assert unbilled_runs_daily_limit() == 20
+        monkeypatch.setenv("PUBLIC_API_USER_UNBILLED_DAILY_LIMIT", "muchas")
+        assert unbilled_runs_daily_limit() == 20
+        monkeypatch.setenv("PUBLIC_API_USER_UNBILLED_DAILY_LIMIT", "2")
+        cache, key = FakeCache(), _free_key()
+        for _ in range(2):
+            await self._run(key, cache)
+        exc = await self._reject(key, cache)
+        assert exc.status_code == 429 and "2 per day" in exc.detail
+
+    @pytest.mark.asyncio
+    async def test_the_mcp_says_when_it_renews(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """El MCP elige el mensaje por el `detail` (ver mcp_publico/core.py)."""
+        from mcp_publico import core
+
+        monkeypatch.setenv("PUBLIC_API_USER_UNBILLED_DAILY_LIMIT", "1")
+        cache, key = FakeCache(), _free_key()
+        await self._run(key, cache)
+        exc = await self._reject(key, cache)
+        assert exc.headers is not None
+        msg = core.error_message(429, exc.detail, retry_after=exc.headers["Retry-After"])
+        assert "21:00" in msg
+        assert "minuto" not in msg and "esperá un rato" not in msg
+
+
+class TestReplayRate:
+    """Las repeticiones de una pregunta ya respondida tienen su propio límite."""
+
+    def test_never_below_the_plan_limit(self) -> None:
+        free = ApiKey(id=uuid4(), user_id=uuid4(), plan="free", is_active=True)
+        pro = ApiKey(id=uuid4(), user_id=uuid4(), plan="pro", is_active=True)
+        assert replay_per_min(free) == REPLAY_PER_MIN == 10
+        assert replay_per_min(pro) == PLAN_LIMITS["pro"]["per_min"]
+
+    @pytest.mark.asyncio
+    async def test_the_eleventh_repeat_in_a_minute_is_429(self) -> None:
+        cache, key = FakeCache(), _free_key()
+        for _ in range(10):
+            await check_replay_rate(key, cache)  # type: ignore[arg-type]
+        with pytest.raises(HTTPException) as exc_info:
+            await check_replay_rate(key, cache)  # type: ignore[arg-type]
+        assert exc_info.value.status_code == 429
+        assert "minute" in exc_info.value.detail
+        # El de las preguntas no se toca.
+        assert f"rl:user:{key.user_id}:min" not in cache.counters
+        assert cache.ttls[f"rl:user:{key.user_id}:replay:min"] == 60
+
+    @pytest.mark.asyncio
+    async def test_fails_open_without_redis(self) -> None:
+        cache, key = FakeCache(), _free_key()
+        cache.down = True
+        await check_replay_rate(key, cache)  # type: ignore[arg-type]
+
+
+class TestBillable:
+    """Qué respuesta de `/ask` descuenta: el criterio de la web más el caché."""
+
+    @pytest.mark.parametrize("intent", ["", "agent", "consulta_datos"])
+    def test_a_complete_model_answer_is_billable(self, intent: str) -> None:
+        result = EngineResult(answer="La desocupación fue 7,6 %.", intent=intent)
+        assert answer_is_billable(result)
+        assert answer_used_model(result)
+
+    @pytest.mark.parametrize(
+        "intent",
+        ["cached", "casual", "meta", "educational", "clarification", "injection_blocked"],
+    )
+    def test_these_are_not_billable(self, intent: str) -> None:
+        assert not answer_is_billable(EngineResult(answer="algo", intent=intent))
+
+    def test_an_empty_answer_is_not_billable(self) -> None:
+        assert not answer_is_billable(EngineResult(answer="  ", intent="agent"))
+
+    def test_clarification_used_the_model_but_cache_and_greetings_did_not(self) -> None:
+        assert answer_used_model(EngineResult(answer="¿De qué año?", intent="clarification"))
+        assert not answer_used_model(EngineResult(answer="x", intent="cached"))
+        assert not answer_used_model(EngineResult(answer="¡Hola!", intent="casual"))
 
 
 class TestMonthHelpers:

@@ -1,7 +1,18 @@
+"""ArgentinaDatos y DolarApi: agregadores no oficiales de cotizaciones.
+
+Los dos son del mismo autor y no son fuentes oficiales. DolarApi sirve el
+último valor (la casa "oficial" es la pizarra del Banco Nación) y
+ArgentinaDatos la historia. El dólar oficial del BCRA sale de
+``BCRAAdapter.get_variable`` (variables 4 y 5 de la API v4); estos resultados
+llevan ``metadata["oficial"] = False`` y lo dicen en el título.
+"""
+
 from __future__ import annotations
 
 import logging
-from datetime import UTC, datetime
+from collections.abc import Callable
+from datetime import UTC, date, datetime, timedelta, timezone
+from typing import Any
 
 import httpx
 
@@ -11,6 +22,9 @@ from app.domain.exceptions.error_codes import ErrorCode
 from app.domain.ports.connectors.argentina_datos import IArgentinaDatosConnector
 
 logger = logging.getLogger(__name__)
+
+# Argentina no tiene horario de verano desde 2009.
+_AR = timezone(timedelta(hours=-3), "ART")
 
 ARGENTINA_DATOS_BASE_URL = "https://api.argentinadatos.com/v1"
 DOLARAPI_BASE_URL = "https://dolarapi.com/v1"
@@ -30,9 +44,91 @@ _ALLOWED_CASAS = frozenset(
 )
 
 
+def _today_ar() -> date:
+    return datetime.now(_AR).date()
+
+
+def _fecha_ar(raw: Any) -> date | None:
+    """La fecha argentina de una fecha o de un instante.
+
+    ArgentinaDatos da fechas ("2026-10-04"); DolarApi da el instante de la
+    actualización en UTC ("2026-10-05T00:30:00.000Z", que en Argentina son las
+    21:30 del 04-oct). Cortar los primeros 10 caracteres daba la fecha UTC: de
+    21 a 24 h ART todo valor recién actualizado parecía de mañana.
+    """
+    if not raw:
+        return None
+    text = str(raw).strip()
+    try:
+        if len(text) > 10 and text[10] in "T ":
+            moment = datetime.fromisoformat(text.replace("Z", "+00:00"))
+            return moment.astimezone(_AR).date() if moment.tzinfo else moment.date()
+        return date.fromisoformat(text[:10])
+    except ValueError:
+        return None
+
+
+def _hora_ar(raw: Any) -> Any:
+    """Un instante con zona pasado a hora argentina; lo demás queda igual.
+
+    "2026-10-05T00:30:00.000Z" → "2026-10-04T21:30-03:00": el modelo lee la
+    fecha del texto y la del día argentino es la que corresponde.
+    """
+    text = str(raw or "").strip()
+    if len(text) <= 10 or text[10] not in "T ":
+        return raw
+    try:
+        moment = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return raw
+    if moment.tzinfo is None:
+        return raw
+    return moment.astimezone(_AR).isoformat(timespec="minutes")
+
+
+def _drop_future(items: list[Any], today: date) -> list[Any]:
+    """Saca las filas con fecha posterior a hoy (en Argentina).
+
+    El histórico de ArgentinaDatos trae días que todavía no llegaron,
+    rellenados con el último valor: el domingo 04-oct terminaba en el lunes
+    05-oct a 1.490/1.540. Con esas filas el modelo podía presentar
+    "05/10/2026" como el último dato. Los instantes de DolarApi se comparan
+    en hora argentina. Una fila sin fecha legible se deja: la descarta quien
+    la lee.
+    """
+    kept: list[Any] = []
+    for d in items:
+        raw = (d.get("fechaActualizacion") or d.get("fecha")) if isinstance(d, dict) else None
+        fecha = _fecha_ar(raw)
+        if fecha is not None and fecha > today:
+            continue
+        kept.append(d)
+    return kept
+
+
+def _ultima_observacion(records: list[dict[str, Any]]) -> str | None:
+    fechas = [f for f in (_fecha_ar(r.get("fecha")) for r in records) if f is not None]
+    return max(fechas).isoformat() if fechas else None
+
+
+def _dolar_title(casa: str | None, ultimo: bool) -> str:
+    """El título de la fuente: dice de dónde sale y que no es oficial."""
+    if casa == "oficial":
+        if ultimo:
+            return "Pizarra del Banco Nación vía DolarApi (no oficial)"
+        return "Pizarra del Banco Nación, histórico vía ArgentinaDatos (no oficial)"
+    via = "DolarApi" if ultimo else "ArgentinaDatos"
+    label = f"Dólar {casa.capitalize()}" if casa else "Dólar todas las casas"
+    kind = "actual" if ultimo else "histórica"
+    return f"Cotización {kind} {label} vía {via} (no oficial)"
+
+
 class ArgentinaDatosAdapter(IArgentinaDatosConnector):
-    def __init__(self, http_client: httpx.AsyncClient) -> None:
+    def __init__(
+        self, http_client: httpx.AsyncClient, today: Callable[[], date] | None = None
+    ) -> None:
         self._http = http_client
+        self._today = today or _today_ar
 
     async def fetch_dolar(
         self,
@@ -61,6 +157,7 @@ class ArgentinaDatosAdapter(IArgentinaDatosConnector):
             if not items or not isinstance(items, list):
                 return None
 
+            items = _drop_future(items, self._today())
             recent = items if ultimo else items[-60:]
             records = []
             for d in recent:
@@ -69,7 +166,7 @@ class ArgentinaDatosAdapter(IArgentinaDatosConnector):
                     continue
                 records.append(
                     {
-                        "fecha": fecha,
+                        "fecha": _hora_ar(fecha),
                         "casa": d.get("casa", casa or ""),
                         "compra": d.get("compra"),
                         "venta": d.get("venta"),
@@ -81,18 +178,27 @@ class ArgentinaDatosAdapter(IArgentinaDatosConnector):
 
             casa_label = casa.capitalize() if casa else "todas las casas"
             source = "dolarapi" if ultimo else "argentina_datos"
-            portal_name = "DolarApi" if ultimo else "ArgentinaDatos API"
+            portal_name = (
+                "DolarApi (agregador no oficial)"
+                if ultimo
+                else "ArgentinaDatos (agregador no oficial)"
+            )
             portal_url = "https://dolarapi.com" if ultimo else "https://argentinadatos.com"
             description = (
                 f"Cotización actual del dólar {casa_label}"
                 if ultimo
                 else f"Cotización histórica del dólar {casa_label}"
             )
+            if casa == "oficial":
+                description += (
+                    ": pizarra del Banco Nación, no la referencia oficial del BCRA "
+                    "(minorista promedio vendedor y mayorista Com. A 3500)"
+                )
             return DataResult(
                 source=source,
                 portal_name=portal_name,
                 portal_url=portal_url,
-                dataset_title=f"Cotización {'actual' if ultimo else 'histórica'} Dólar {casa_label}",
+                dataset_title=_dolar_title(casa, ultimo),
                 format="time_series",
                 records=records,
                 metadata={
@@ -100,7 +206,10 @@ class ArgentinaDatosAdapter(IArgentinaDatosConnector):
                     "fetched_at": datetime.now(UTC).isoformat(),
                     "description": description,
                     "last_updated": records[-1]["fecha"],
+                    "ultima_observacion": _ultima_observacion(records),
+                    "frecuencia": "diaria",
                     "realtime": ultimo,
+                    "oficial": False,
                 },
             )
         except ConnectorError:
@@ -126,14 +235,14 @@ class ArgentinaDatosAdapter(IArgentinaDatosConnector):
             if not items:
                 return None
 
-            recent = items[-60:]
+            recent = _drop_future(items, self._today())[-60:]
             records = [{"fecha": d["fecha"], "riesgo_pais": d["valor"]} for d in recent]
             if not records:
                 return None
 
             return DataResult(
                 source="argentina_datos",
-                portal_name="ArgentinaDatos API",
+                portal_name="ArgentinaDatos (agregador no oficial)",
                 portal_url="https://argentinadatos.com",
                 dataset_title="Riesgo País — EMBI+ Argentina",
                 format="time_series",
@@ -142,6 +251,9 @@ class ArgentinaDatosAdapter(IArgentinaDatosConnector):
                     "total_records": len(records),
                     "fetched_at": datetime.now(UTC).isoformat(),
                     "description": "Índice de Riesgo País (EMBI+ Argentina, puntos básicos)",
+                    "ultima_observacion": _ultima_observacion(records),
+                    "frecuencia": "diaria",
+                    "oficial": False,
                 },
             )
         except ConnectorError:

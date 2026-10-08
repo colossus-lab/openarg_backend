@@ -531,12 +531,51 @@ def _derive_grounding_confidence(
     return min(llm_confidence, 0.6)
 
 
+def coverage_warnings(results: list[DataResult]) -> list[str]:
+    """El aviso de total incompleto, si algún resultado descartó filas.
+
+    `confidence` is deliberately stripped from the API response, so a
+    coverage failure has to ride the `warnings` channel to reach the client
+    at all. Lo usan los dos motores: el pipeline viejo desde
+    ``ground_citations`` y el agente desde el runner.
+    """
+    for result in results:
+        coverage = (result.metadata or {}).get("coverage_warning")
+        if not coverage:
+            continue
+        excluded = coverage.get("excluded_rows")
+        total = coverage.get("total_rows")
+        if coverage.get("measured") and excluded and total:
+            pct = coverage.get("excluded_pct")
+            pct_text = f" ({pct} %)" if pct is not None else ""
+            return [
+                f"Total incompleto: {excluded} de {total} filas{pct_text} "
+                "quedaron fuera del cálculo por su formato numérico."
+            ]
+        return [
+            "Total incompleto: la consulta descartó filas por formato numérico "
+            "antes de agregar, así que el resultado no cubre todo el universo."
+        ]
+    return []
+
+
+def quality_ceiling(results: list[DataResult]) -> float:
+    """El tope de confianza que imponen las marcas de calidad de los resultados."""
+    return _quality_ceiling(results)
+
+
 def ground_citations(
     answer: str,
     citations: list[dict[str, Any]],
     results: list[DataResult],
     confidence: float,
 ) -> tuple[list[dict[str, Any]], list[str], float]:
+    """Verifica las citas del bloque META del analista (pipeline viejo).
+
+    El agente no pasa por acá: no produce citas, y con ``citations=[]`` lo
+    único que salía era el aviso genérico de abajo, en toda respuesta con
+    números. Sus cifras las verifica ``answers.verification``.
+    """
     evidence = collect_numeric_evidence(results)
     grounded: list[dict[str, Any]] = []
     warnings: list[str] = []
@@ -547,28 +586,7 @@ def ground_citations(
             "La respuesta contiene números pero no incluye citas estructuradas; verificación parcial."
         )
 
-    # `confidence` is deliberately stripped from the API response, so a
-    # coverage failure has to ride the `warnings` channel to reach the client
-    # at all. Emit it regardless of what the analyst wrote.
-    for result in results:
-        coverage = (result.metadata or {}).get("coverage_warning")
-        if not coverage:
-            continue
-        excluded = coverage.get("excluded_rows")
-        total = coverage.get("total_rows")
-        if coverage.get("measured") and excluded and total:
-            pct = coverage.get("excluded_pct")
-            pct_text = f" ({pct} %)" if pct is not None else ""
-            warnings.append(
-                f"Total incompleto: {excluded} de {total} filas{pct_text} "
-                "quedaron fuera del cálculo por su formato numérico."
-            )
-        else:
-            warnings.append(
-                "Total incompleto: la consulta descartó filas por formato numérico "
-                "antes de agregar, así que el resultado no cubre todo el universo."
-            )
-        break
+    warnings.extend(coverage_warnings(results))
 
     for citation in citations:
         assessment = _assess_citation(citation, evidence)

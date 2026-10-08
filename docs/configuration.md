@@ -196,6 +196,7 @@ These override TOML settings:
 | `GEMINI_API_KEY` | Google AI API key | No (optional, if using Gemini) |
 | `ANTHROPIC_API_KEY` | Anthropic API key | No (fallback LLM) |
 | `S3_BUCKET` | S3 bucket for datasets | No (default: openarg-datasets) |
+| `OPENARG_BEAT_DESACTIVADAS` | Entradas del beat que no se agendan, separadas por comas: las claves de `beat_schedule` (p. ej. `ingest-series-tiempo,check-series-freshness,snapshot-bcra`), no los nombres de las tareas. Sirve para desplegar sin que esas tareas corran solas y correrlas a mano cuando se decida. Se lee al crear la app de Celery, así que va en el `.env` que comparten el beat y los workers (los workers la usan para no esperar el latido de una tarea frenada) y toma efecto al reiniciarlos. Un nombre que no existe sale como `ERROR` en el log y no frena nada. Ver `docs/deploy-produccion.md` | No (default: vacía, la agenda entera) |
 
 ## Config Loading
 

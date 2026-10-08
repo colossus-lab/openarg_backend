@@ -139,7 +139,7 @@ def test_el_dataset_que_esta_en_el_repo_es_valido() -> None:
     from tests.evaluation.run_eval import DEFAULT_DATASET, load_golden_dataset
 
     entries = load_golden_dataset(DEFAULT_DATASET)
-    assert len(entries) == 53
+    assert len(entries) == 75
     assert validate_dataset(entries) == []
 
     # Los casos negativos sólo sirven si traen la expectativa: sin

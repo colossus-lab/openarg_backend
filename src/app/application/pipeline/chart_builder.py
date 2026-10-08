@@ -7,6 +7,7 @@ import logging
 import re
 from typing import Any
 
+from app.application.consultas.fechas import es_fecha_de_atributo, es_nombre_de_fecha, fecha_iso
 from app.domain.entities.connectors.data_result import DataResult
 
 logger = logging.getLogger(__name__)
@@ -20,13 +21,62 @@ DATE_COLUMNS = frozenset({"fecha", "indice_tiempo", "periodo"})
 
 
 def is_date_column(name: str) -> bool:
-    """True si la columna es una fecha que ordena una serie."""
-    lowered = name.lower()
-    return lowered in DATE_COLUMNS or "date" in lowered
+    """True si la columna es una fecha que ordena una serie.
+
+    La regla vive en ``consultas.fechas``: nombre exacto, o una palabra
+    "fecha"/"date" en el nombre (``PUBLICACION_FECHA``, ``start_date``), y nunca
+    una fecha de carga o auditoría. Antes alcanzaba la subcadena "date", y
+    ``updated_at``/``updated_ts`` (132 tablas en prod) se tomaban como la fecha
+    de la serie.
+    """
+    return es_nombre_de_fecha(name)
+
+
+def tabla_del_resultado(result: DataResult) -> str:
+    """La tabla servida y el título publicado: dicen de qué evento es una fecha.
+
+    El título genérico de NL2SQL ("Consulta SQL: <pregunta>") no cuenta: con él,
+    el eje dependía de las palabras que usara el usuario.
+    """
+    titulo = result.dataset_title or ""
+    if titulo.startswith(_GENERIC_TITLE_PREFIX):
+        titulo = ""
+    served = (result.metadata or {}).get("served_table")
+    return " ".join(str(t) for t in (served, titulo) if t)
+
+
+def es_eje_temporal(name: str, tabla: str = "") -> bool:
+    """Una fecha que ordena la serie (gráfico y resumen del contexto).
+
+    Una fecha de nacimiento, vencimiento o alta describe a alguien de la fila,
+    no cuándo pasó el dato: no ordena la serie, salvo que sea el evento que
+    registra la tabla (``fecha_nacimiento`` en caba__nacimientos), igual que en
+    ``consultas.fechas`` (H044). A diferencia del filtro por período, no se usa
+    ni como último recurso: en un registro crudo daba líneas de números de DNI
+    ordenados por vencimiento. Sin esto, un ranking de DDJJ se graficaba como
+    línea por ``fecha_nacimiento`` y el contexto le resumía el patrimonio "de
+    primero a último" por cumpleaños.
+    """
+    return is_date_column(name) and not es_fecha_de_atributo(name, tabla)
 
 
 def _sort_chart_rows(rows: list[dict[str, Any]], x_key: str) -> list[dict[str, Any]]:
-    return sorted(rows, key=lambda row: str(row.get(x_key, "")))
+    """Ordena el eje temporal por la fecha normalizada, no por el texto.
+
+    Con ``str()``, "1/10/2017" quedaba antes que "1/9/2017" y "Junio de 2026"
+    antes que "Marzo de 2026": el gráfico de línea salía desordenado en las
+    respuestas del agente. Lo que no se reconoce como fecha va al final, en
+    su orden de texto.
+    """
+
+    def key(row: dict[str, Any]) -> tuple[int, str]:
+        value = row.get(x_key)
+        iso = fecha_iso(value, "inicio")
+        if iso is not None:
+            return (0, iso)
+        return (1, "" if value is None else str(value))
+
+    return sorted(rows, key=key)
 
 
 def _looks_like_mixed_quote_snapshot(
@@ -87,10 +137,11 @@ def build_deterministic_charts(
         keys = list(first.keys())
 
         # Detect temporal key
+        tabla = tabla_del_resultado(result)
         time_key = None
         for k in keys:
             kl = k.lower()
-            if is_date_column(k) or kl in ("año", "year", "mes"):
+            if es_eje_temporal(k, tabla) or kl in ("año", "year", "mes"):
                 time_key = k
                 break
 

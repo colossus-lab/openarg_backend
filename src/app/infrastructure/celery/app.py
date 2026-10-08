@@ -69,6 +69,34 @@ _HEAVY_COLLECT_QUEUE = os.getenv("OPENARG_HEAVY_COLLECT_QUEUE", "collector-heavy
 _HEAVY_RETRY_QUEUE = os.getenv("OPENARG_HEAVY_RETRY_QUEUE", "collector-heavy-retry")
 
 
+def quitar_entradas_desactivadas(agenda: dict) -> list[str]:
+    """Saca de la agenda las entradas de `OPENARG_BEAT_DESACTIVADAS` y devuelve cuáles.
+
+    La variable es una lista separada por comas de nombres de ENTRADAS (las
+    claves de `beat_schedule`, p. ej. ``ingest-series-tiempo``), no de tareas.
+    Sirve para desplegar código nuevo sin que el beat dispare solo lo que
+    todavía no se quiere correr, y correrlo a mano cuando se decida. El beat
+    borra de su archivo de agenda las entradas que ya no están, así que no
+    queda nada pendiente de antes. Un nombre que no existe se loguea como
+    error: un error de tipeo dejaría corriendo, y en silencio, justo la tarea
+    que se quería frenar.
+    """
+    pedidas = dict.fromkeys(
+        n.strip() for n in os.getenv("OPENARG_BEAT_DESACTIVADAS", "").split(",") if n.strip()
+    )
+    sacadas = [n for n in pedidas if agenda.pop(n, None) is not None]
+    desconocidas = [n for n in pedidas if n not in sacadas]
+    if sacadas:
+        logger.warning("beat: OPENARG_BEAT_DESACTIVADAS saca de la agenda %s", sacadas)
+    if desconocidas:
+        logger.error(
+            "beat: OPENARG_BEAT_DESACTIVADAS nombra entradas que no existen: %s "
+            "(van las claves de beat_schedule, no los nombres de las tareas)",
+            desconocidas,
+        )
+    return sacadas
+
+
 def create_celery() -> Celery:
     broker = os.getenv("CELERY_BROKER_URL", "redis://localhost:6379/0")
     backend = os.getenv("CELERY_RESULT_BACKEND", "redis://localhost:6379/1")
@@ -116,6 +144,7 @@ def create_celery() -> Celery:
             "app.infrastructure.celery.tasks.parse_repair_tasks",
             "app.infrastructure.celery.tasks.registry_reconcile_tasks",
             "app.infrastructure.celery.tasks.quality_alert_tasks",
+            "app.infrastructure.celery.tasks.search_canary_tasks",
             "app.infrastructure.celery.tasks.columns_backfill",
             "app.infrastructure.celery.tasks.identity_reconcile",
             "app.infrastructure.celery.tasks.retry_our_failures",
@@ -172,6 +201,7 @@ def create_celery() -> Celery:
         "openarg.scrape_senado_staff": {"queue": "scraper"},
         "openarg.ingest_georef": {"queue": "ingest"},
         "openarg.ingest_series_tiempo": {"queue": "ingest"},
+        "openarg.check_series_freshness": {"queue": "ingest"},
         "openarg.run_pipeline": {"queue": "scraper"},
         "openarg.scrape_mapa_estado": {"queue": "scraper"},
         "openarg.scrape_gobernadores": {"queue": "scraper"},
@@ -208,6 +238,7 @@ def create_celery() -> Celery:
         "openarg.check_mart_expectations": {"queue": "ingest"},
         "openarg.backfill_dataset_columns": {"queue": "ingest"},
         "openarg.portal_canary": {"queue": "ingest"},
+        "openarg.search_recall_canary": {"queue": "ingest"},
         "openarg.reconcile_dataset_identities": {"queue": "ingest"},
         "openarg.cleanup_duplicate_tables": {"queue": "ingest"},
         "openarg.retry_our_own_failures": {"queue": "ingest"},
@@ -471,6 +502,16 @@ def create_celery() -> Celery:
                 # finds out by reading a list of failures.
                 "task": "openarg.portal_canary",
                 "schedule": crontab(hour=8, minute=40),
+                "options": {"queue": "ingest"},
+            },
+            "search-recall-canary": {
+                # Nightly, before the 03:00 scrapes start re-embedding: the
+                # catalogue search's HNSW index against the exact search on
+                # ~20 fixed queries, alerting if recall@10 drops below 0.95.
+                # The index changed from one day to the next (SMVM was found on
+                # 03-Oct and lost on 04-Oct) and nothing watched it.
+                "task": "openarg.search_recall_canary",
+                "schedule": crontab(hour=2, minute=40),
                 "options": {"queue": "ingest"},
             },
             "quality-alerts": {
@@ -834,8 +875,23 @@ def create_celery() -> Celery:
                 "options": {"queue": "ingest"},
             },
             "ingest-series-tiempo": {
+                # Diario 18:45 ART: el INDEC publica a las 16 y el BCRA carga
+                # durante el día. Era mensual (día 1) y además salteaba toda
+                # serie ya cacheada, así que las 12 tablas quedaron congeladas
+                # desde mayo. Ahora sólo reescribe si la API tiene algo nuevo:
+                # una corrida sin novedades son 12 pedidos livianos.
+                # `ingest` la consumen `openarg_worker_ingest` en staging y en
+                # prod (`-Q ingest,orchestrator`, docker inspect 04-oct-2026).
                 "task": "openarg.ingest_series_tiempo",
-                "schedule": crontab(day_of_month=1, hour=1, minute=30),  # Monthly, day 1
+                "schedule": crontab(hour=18, minute=45),  # 18:45 ART = 21:45 UTC
+                "options": {"queue": "ingest"},
+            },
+            "check-series-freshness": {
+                # 45 minutos después de la ingesta: si la tabla sigue atrás de
+                # la API, la ingesta ya tuvo su oportunidad. Separa la tabla
+                # atrasada (bug nuestro) de la fuente atrasada.
+                "task": "openarg.check_series_freshness",
+                "schedule": crontab(hour=19, minute=30),  # 19:30 ART
                 "options": {"queue": "ingest"},
             },
             "scrape-mapa-estado": {
@@ -899,6 +955,9 @@ def create_celery() -> Celery:
             },
         }
     )
+
+    # Lo que el operador frenó para este despliegue (docs/configuration.md).
+    quitar_entradas_desactivadas(app.conf.beat_schedule)
 
     return app
 

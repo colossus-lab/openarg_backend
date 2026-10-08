@@ -1,6 +1,6 @@
 """Registro de uso de la API pública en `api_usage`, para el tablero de admin.
 
-Tres entradas:
+Cuatro entradas:
 
 - `log_usage`: una fila por pedido que llegó a ejecutarse (`/ask` y el modo
   datos). En el modo datos nunca se guarda `question`: qué buscó alguien o qué
@@ -10,6 +10,9 @@ Tres entradas:
 - `log_rejection`: los 429/503 del cupo, que antes se lanzaban sin dejar
   rastro. Son la mejor señal de demanda, pero un cliente que insiste puede
   generar miles; se registra a lo sumo uno por clave, modo y minuto.
+- `log_replay`: las preguntas repetidas de `/ask` que se contestan con la
+  respuesta ya calculada. Mismo freno: a lo sumo una por clave, pregunta y
+  minuto, para que un bucle no llene `api_usage` a la velocidad del cliente.
 
 Nada de esto puede romper la respuesta al usuario: si la base falla, se loguea
 en debug y sigue.
@@ -150,16 +153,7 @@ async def log_rejection(
     question: str | None = None,
 ) -> None:
     """Registra un 429/503 del cupo, uno por clave, modo y minuto como mucho."""
-    minute = datetime.now(UTC).strftime("%Y%m%d%H%M")
-    try:
-        seen = await cache.increment_with_ttl(
-            f"rl:logged:{api_key.id}:{mode}:{minute}", _REJECTION_LOG_TTL
-        )
-    except Exception:
-        # Sin Redis no hay forma de acotar la cantidad: mejor no registrar.
-        logger.debug("Rejection log throttle unavailable", exc_info=True)
-        return
-    if seen != 1:
+    if not await _first_this_minute(cache, f"{api_key.id}:{mode}"):
         return
     await log_usage(
         repo,
@@ -171,3 +165,50 @@ async def log_rejection(
         status_code=status_code,
         question=question,
     )
+
+
+async def log_replay(
+    repo: IApiKeyRepository,
+    cache: ICacheService,
+    api_key: ApiKey,
+    request: Request,
+    *,
+    endpoint: str,
+    tool: str,
+    question: str,
+    fingerprint: str,
+    duration_ms: int,
+) -> bool:
+    """Registra una pregunta repetida de `/ask`, una por clave, pregunta y minuto
+    como mucho. True si quedó registrada (quien llama toca `last_used_at` sólo
+    entonces, por el mismo motivo).
+
+    Costo medido en 0: no corrió el modelo (y así el tablero no lo estima).
+    """
+    if not await _first_this_minute(cache, f"{api_key.id}:replay:{fingerprint}"):
+        return False
+    await log_usage(
+        repo,
+        api_key,
+        request,
+        endpoint=endpoint,
+        mode="respuestas",
+        tool=tool,
+        status_code=200,
+        question=question,
+        duration_ms=duration_ms,
+        cost_usd=0.0,
+    )
+    return True
+
+
+async def _first_this_minute(cache: ICacheService, scope: str) -> bool:
+    """Si es la primera vez en este minuto para ``scope`` (``rl:logged:…``)."""
+    minute = datetime.now(UTC).strftime("%Y%m%d%H%M")
+    try:
+        seen = await cache.increment_with_ttl(f"rl:logged:{scope}:{minute}", _REJECTION_LOG_TTL)
+    except Exception:
+        # Sin Redis no hay forma de acotar la cantidad: mejor no registrar.
+        logger.debug("Usage log throttle unavailable", exc_info=True)
+        return False
+    return seen == 1

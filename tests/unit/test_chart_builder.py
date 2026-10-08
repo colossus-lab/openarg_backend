@@ -150,6 +150,154 @@ class TestIndiceTiempo:
         assert charts[0]["type"] == "bar_chart"
 
 
+class TestFechasNoIso:
+    """Auditoría 4.1 / "lo que no vio" 8: `_sort_chart_rows` ordenaba con str()."""
+
+    def test_d_m_aaaa_se_ordena_por_fecha_no_por_texto(self):
+        records = [
+            {"Fecha": "1/10/2017", "valor": 3},
+            {"Fecha": "1/9/2017", "valor": 2},
+            {"Fecha": "15/1/2018", "valor": 4},
+            {"Fecha": "1/8/2017", "valor": 1},
+        ]
+        charts = _build_deterministic_charts([_make_result(records, format="json")])
+        assert [r["valor"] for r in charts[0]["data"]] == [1, 2, 3, 4]
+
+    def test_meses_en_castellano(self):
+        records = [
+            {"periodo": "Junio de 2026", "valor": 6},
+            {"periodo": "Marzo de 2026", "valor": 3},
+            {"periodo": "Enero de 2027", "valor": 13},
+        ]
+        charts = _build_deterministic_charts([_make_result(records, format="json")])
+        assert [r["valor"] for r in charts[0]["data"]] == [3, 6, 13]
+
+    def test_updated_at_no_es_el_eje_temporal(self):
+        records = [
+            {"updated_at": "2026-05-06", "nombre": "B", "valor": 2},
+            {"updated_at": "2026-05-06", "nombre": "A", "valor": 1},
+        ]
+        charts = _build_deterministic_charts([_make_result(records, format="json")])
+        assert charts[0]["xKey"] == "nombre" and charts[0]["type"] == "bar_chart"
+
+    def test_publicacion_fecha_es_una_fecha(self):
+        from app.application.pipeline.chart_builder import is_date_column
+
+        assert is_date_column("PUBLICACION_FECHA")
+        assert not is_date_column("updated_ts")
+        assert not is_date_column("candidate")
+
+    def test_fecha_de_nacimiento_no_es_el_eje_de_un_ranking_de_personas(self):
+        # Las DDJJ traen `fecha_nacimiento` antes de las cifras: con la regla de
+        # fechas de las olas el ranking se graficaba como línea por cumpleaños.
+        records = [
+            {"nombre": "A", "fecha_nacimiento": "1970-05-01", "patrimonio_cierre": 10.0},
+            {"nombre": "B", "fecha_nacimiento": "1965-02-11", "patrimonio_cierre": 7.5},
+        ]
+        result = _make_result(records, format="json", title='Búsqueda DDJJ: "juan"')
+        charts = _build_deterministic_charts([result])
+        assert charts[0]["type"] == "bar_chart"
+        assert charts[0]["xKey"] == "nombre"
+        assert charts[0]["yKeys"] == ["patrimonio_cierre"]
+
+    def test_fecha_de_nacimiento_es_el_eje_de_una_tabla_de_nacimientos(self):
+        records = [
+            {"fecha_nacimiento": "2024-02-01", "cantidad": 12},
+            {"fecha_nacimiento": "2024-01-01", "cantidad": 10},
+        ]
+        result = _make_result(records, format="json", title="caba__nacimientos__a1b2c3d4__v1")
+        charts = _build_deterministic_charts([result])
+        assert charts[0]["type"] == "line_chart"
+        assert charts[0]["xKey"] == "fecha_nacimiento"
+        assert [r["cantidad"] for r in charts[0]["data"]] == [10, 12]
+
+    def test_la_fecha_del_dato_gana_a_una_de_vencimiento_anterior(self):
+        records = [
+            {"fecha_vencimiento": "2030-01-01", "fecha": "2024-02-01", "monto": 2},
+            {"fecha_vencimiento": "2029-01-01", "fecha": "2024-01-01", "monto": 1},
+        ]
+        charts = _build_deterministic_charts([_make_result(records, format="json")])
+        assert charts[0]["xKey"] == "fecha"
+        assert [r["monto"] for r in charts[0]["data"]] == [1, 2]
+
+    def test_fecha_nac_abreviada_no_le_gana_a_la_fecha_del_dato(self):
+        # raw.caba__personas_buscadas: `fecha_nac` antes que `fecha_extravio`.
+        records = [
+            {
+                "apellido": "X",
+                "nombre": "A",
+                "fecha_nac": "1990-01-01",
+                "edad": 30,
+                "fecha_extravio": "2020-02-01",
+            },
+            {
+                "apellido": "Y",
+                "nombre": "B",
+                "fecha_nac": "1980-01-01",
+                "edad": 40,
+                "fecha_extravio": "2020-01-01",
+            },
+        ]
+        result = _make_result(records, format="json", title="Personas buscadas")
+        charts = _build_deterministic_charts([result])
+        assert charts[0]["xKey"] == "fecha_extravio"
+
+    def test_un_vencimiento_abreviado_no_ordena_un_registro(self):
+        # Transportes autorizados: con `fecha_vto` como eje salía una línea de
+        # números de documento ordenados por vencimiento.
+        records = [
+            {
+                "numero": "1",
+                "fecha_vto": "2027-01-01",
+                "apellido_y_nombre": "A",
+                "numero_documento": 20111222,
+            },
+            {
+                "numero": "2",
+                "fecha_vto": "2026-01-01",
+                "apellido_y_nombre": "B",
+                "numero_documento": 30111222,
+            },
+        ]
+        result = _make_result(records, format="json", title="Transportes autorizados de pasajeros")
+        assert _build_deterministic_charts([result]) == []
+        from app.application.pipeline.chart_builder import es_eje_temporal
+
+        assert not es_eje_temporal("Fecha Primer Vto.")
+
+    def test_en_la_deuda_publica_el_vencimiento_es_el_perfil_de_pagos(self):
+        # mendoza__deuda_publica_2018: en prod era el eje (tenía "date").
+        vto = "Fecha vto./\nMaturity Date"
+        records = [
+            {"Acreedor": "A", vto: "2030-06-15", "Saldo/Outstanding": 9.0},
+            {"Acreedor": "B", vto: "2024-03-01", "Saldo/Outstanding": 3.0},
+        ]
+        result = _make_result(records, format="json", title="Deuda Pública 2018")
+        result.metadata["served_table"] = "raw.mendoza__deuda_publica_2018__cab67076__v1"
+        charts = _build_deterministic_charts([result])
+        assert charts[0]["type"] == "line_chart"
+        assert charts[0]["xKey"] == vto
+
+    def test_en_nl2sql_el_eje_no_depende_de_como_se_pregunta(self):
+        records = [
+            {"fecha_fallecimiento": "2021-02-01", "casos": 5},
+            {"fecha_fallecimiento": "2021-01-01", "casos": 3},
+        ]
+        con_palabra = _make_result(
+            records, format="json", title="Consulta SQL: ¿Cuántos fallecimientos por mes?"
+        )
+        sin_palabra = _make_result(
+            records, format="json", title="Consulta SQL: ¿Cuántos murieron por mes?"
+        )
+        assert _build_deterministic_charts([con_palabra]) == _build_deterministic_charts(
+            [sin_palabra]
+        )
+        # La tabla servida sí dice de qué evento es la fecha.
+        servida = _make_result(records, format="json", title="Consulta SQL: ¿Cuántos murieron?")
+        servida.metadata["served_table"] = "raw.rosario__fallecimientos_covid__a1b2c3d4__v1"
+        assert _build_deterministic_charts([servida])[0]["xKey"] == "fecha_fallecimiento"
+
+
 class TestAdoptLlmTitles:
     def test_generic_sql_title_takes_the_models_title(self):
         det = [{"title": "Consulta SQL: Mostrame las tasas", "xKey": "indice_tiempo", "data": [1]}]

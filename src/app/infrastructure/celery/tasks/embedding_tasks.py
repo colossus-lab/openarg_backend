@@ -56,7 +56,9 @@ def reindex_all_embeddings(self: Any, portal: str | None = None) -> dict[str, An
         logger.info(f"Reindexing {len(dataset_ids)} datasets")
 
         for did in dataset_ids:
-            index_dataset_embedding.delay(did)
+            # Re-generar todo es justamente para cuando el texto no cambió (un
+            # modelo nuevo): sin `force`, la tarea saltea los que ya están.
+            index_dataset_embedding.delay(did, force=True)
 
         return {"dispatched": len(dataset_ids), "portal": portal or "all"}
 

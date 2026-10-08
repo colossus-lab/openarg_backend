@@ -455,3 +455,144 @@ async def test_las_fuentes_previas_salen_de_los_mensajes_guardados() -> None:
     # Más recientes primero, sin repetidos.
     assert await load_previous_sources(str(uuid4()), repo) == ("IPC — Series", "EPH — datos.gob.ar")
     assert await load_previous_sources("", repo) == ()
+
+
+# ── avisos del runner para el agente (04-oct) ──────────────
+
+
+def _evidence(fechas: list[str], **meta: Any) -> Any:
+    from app.domain.entities.connectors.data_result import DataResult
+
+    return DataResult(
+        source="series_tiempo",
+        portal_name="API de Series de Tiempo",
+        portal_url="https://datos.gob.ar/series/api/series/?ids=174.1_RRVAS_IDOS_0_0_36",
+        dataset_title="Series históricas de estadísticas monetarias",
+        format="time_series",
+        records=[{"fecha": f, "Reservas": 35001.0} for f in fechas],
+        metadata={"units": "Millones de dólares", **meta},
+    )
+
+
+class StreamingEngine(FakeEngine):
+    """Un motor que transmite la respuesta entera antes del `complete`."""
+
+    async def stream(self, req: EngineRequest) -> AsyncGenerator[Any, None]:
+        self.requests.append(req)
+        yield ChunkEvent(self.result.answer)
+        yield CompleteEvent(self.result)
+
+
+async def test_el_agente_no_recibe_el_aviso_generico_de_verificacion_parcial(
+    rec: Recorder,
+) -> None:
+    """Salía en 6 de 6 respuestas de la reproducción, incluida la falsa: con
+    ``citations=[]`` el chequeo no verificaba ninguna cifra."""
+    result = EngineResult(
+        answer="La inflación de agosto fue 1,66 %.",
+        evidence=[_evidence(["2026-07-01", "2026-08-01"])],
+    )
+    out = await EngineRunner(FakeEngine(result), MagicMock()).run(_req())
+    assert not any("citas estructuradas" in w for w in out.warnings)
+    assert not any("verificación parcial" in w for w in out.warnings)
+
+
+async def test_el_total_incompleto_sigue_llegando(rec: Recorder) -> None:
+    ev = _evidence(["2026-08-01"], coverage_warning={"measured": False})
+    out = await EngineRunner(
+        FakeEngine(EngineResult(answer="Suman 3.000.", evidence=[ev])), MagicMock()
+    ).run(_req())
+    assert any(w.startswith("Total incompleto") for w in out.warnings)
+
+
+async def test_el_aviso_de_atraso_va_arriba_y_reemplaza_lo_que_ya_salio(rec: Recorder) -> None:
+    """La respuesta falsa de reservas: «abril de 2023: USD 35.001 M»."""
+    answer = "Las reservas son de **USD 35.001 millones**."
+    stale = _evidence(["2023-02-01", "2023-03-01", "2023-04-01"])
+    engine = StreamingEngine(EngineResult(answer=answer, evidence=[stale], cited_evidence=[stale]))
+    events = await _collect(EngineRunner(engine, MagicMock()), _req(channel=CHANNEL_WS))
+    result = events[-1].result
+    assert result.answer.startswith("**Dato atrasado:**")
+    assert "abril de 2023" in result.answer
+    assert result.answer.endswith(answer)
+    # El chat web muestra lo que llegó en streaming: se reemplaza el texto.
+    kinds = [type(e).__name__ for e in events]
+    assert kinds[-3:] == ["ClearAnswerEvent", "ChunkEvent", "CompleteEvent"]
+    assert events[-2].content == result.answer
+    # Y no va además como advertencia: saldría dos veces en el MCP.
+    assert not any("atrasado" in w for w in result.warnings)
+
+
+async def test_un_dato_al_dia_no_toca_la_respuesta(rec: Recorder) -> None:
+    from datetime import date, timedelta
+
+    fresh = (date.today() - timedelta(days=1)).isoformat()
+    ev = _evidence([fresh], realtime=True)
+    engine = StreamingEngine(EngineResult(answer="Cotiza a $1.540.", evidence=[ev]))
+    events = await _collect(EngineRunner(engine, MagicMock()), _req())
+    assert events[-1].result.answer == "Cotiza a $1.540."
+    assert not any(isinstance(e, ClearAnswerEvent) for e in events)
+
+
+async def test_el_aviso_se_calcula_sobre_lo_citado(rec: Recorder) -> None:
+    """Una serie vieja que se leyó pero no se citó no avisa nada."""
+    from datetime import date, timedelta
+
+    stale = _evidence(["2005-09-26", "2005-09-27"])
+    fresh = _evidence([(date.today() - timedelta(days=1)).isoformat()], realtime=True)
+    result = EngineResult(
+        answer="Cotiza a $1.540.", evidence=[stale, fresh], cited_evidence=[fresh]
+    )
+    out = await EngineRunner(FakeEngine(result), MagicMock()).run(_req())
+    assert out.answer == "Cotiza a $1.540."
+
+
+async def test_el_aviso_mira_lo_que_aporto_cifras_y_no_lo_nombrado(rec: Recorder) -> None:
+    """Revisión del 05-oct: una serie vieja citada sólo porque su título
+    aparece en el texto ponía «Dato atrasado» arriba de una respuesta hecha
+    con datos de ayer de otra fuente."""
+    from datetime import date, timedelta
+
+    stale = _evidence(["2005-09-26", "2005-09-27"])
+    fresh = _evidence([(date.today() - timedelta(days=1)).isoformat()], realtime=True)
+    result = EngineResult(
+        answer="Cotiza a $1.540.",
+        evidence=[stale, fresh],
+        cited_evidence=[stale, fresh],
+        figure_evidence=[fresh],
+    )
+    out = await EngineRunner(FakeEngine(result), MagicMock()).run(_req())
+    assert out.answer == "Cotiza a $1.540."
+    # Sin cifras respaldadas, el aviso sigue mirando todo lo citado.
+    result = EngineResult(answer="Ver la serie.", evidence=[stale], cited_evidence=[stale])
+    out = await EngineRunner(FakeEngine(result), MagicMock()).run(_req())
+    assert out.answer.startswith("**Dato atrasado:**")
+
+
+async def test_la_edad_de_tabla_es_la_de_la_tabla_citada(
+    rec: Recorder, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app.domain.entities.connectors.data_result import DataResult
+
+    asked: list[Any] = []
+
+    async def _line(served: Any) -> None:
+        asked.append(served)
+
+    monkeypatch.setattr(runner_module, "_staleness_line", _line)
+
+    def _tabla(name: str) -> DataResult:
+        return DataResult(
+            source=f"sandbox:{name}",
+            portal_name="datos.gob.ar",
+            portal_url="https://datos.gob.ar/x",
+            dataset_title=name,
+            format="json",
+            records=[{"valor": 1.0}],
+            metadata={"served_table": name},
+        )
+
+    leida, citada = _tabla("mart.una"), _tabla("mart.otra")
+    result = EngineResult(answer="Ok.", evidence=[leida, citada], cited_evidence=[citada])
+    await EngineRunner(FakeEngine(result), MagicMock()).run(_req())
+    assert asked == ["mart.otra"]

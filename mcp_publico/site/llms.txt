@@ -1,10 +1,10 @@
 # OpenArg MCP
 
-> Servidor MCP público de OpenArg: acceso a más de 30.000 datasets públicos oficiales de Argentina (INDEC, datos.gob.ar, provincias, municipios, Congreso, presupuesto). Modo datos: buscar, describir y leer tablas. Modo respuestas: preguntas en lenguaje natural respondidas con fuentes citadas.
+> Servidor MCP público de OpenArg: acceso a más de 30.000 datasets públicos oficiales de Argentina (INDEC, datos.gob.ar, provincias, municipios, Congreso, presupuesto). Modo datos: buscar, describir y leer tablas, y calcular totales y rankings. Modo respuestas: preguntas en lenguaje natural respondidas con fuentes citadas.
 
 - Endpoint MCP (Streamable HTTP): https://mcp.openarg.org/mcp
 - Autenticación: header `Authorization: Bearer oarg_sk_…`. Clave gratis en https://openarg.org/desarrolladores
-- Cupo por persona: modo datos 200 pedidos/mes (30/min, hasta 500 filas por pedido); modo respuestas 10 preguntas/mes. Se renueva el 1° de cada mes a las 00:00 UTC. Fundadores (quienes aportan): 2.000 y 100. Al agotarse el cupo sin créditos, la API responde 402.
+- Cupo por persona: modo datos 200 pedidos/mes (30/min, hasta 500 filas por pedido); modo respuestas 10 preguntas/mes (2/min). Se renueva el 1° de cada mes a las 00:00 UTC. Fundadores (quienes aportan): 2.000 y 100. Al agotarse el cupo sin créditos, la API responde 402. Si se pasa el límite por minuto responde 429 con `Retry-After`: los segundos que faltan; esperá eso y reintentá una vez, sin repetir en bucle.
 
 OpenArg es abierto y gratuito, un proyecto de Colossus Lab que se sostiene con aportes de quienes lo usan: https://www.colossuslab.org/support
 
@@ -23,21 +23,23 @@ OpenArg es abierto y gratuito, un proyecto de Colossus Lab que se sostiene con a
    - `GET https://api.openarg.org/api/v1/catalogo/buscar?q=...`
    - `GET https://api.openarg.org/api/v1/catalogo/tabla?nombre=...`
    - `POST https://api.openarg.org/api/v1/catalogo/datos` con `{"tabla": "...", "desde": "AAAA-MM", "limite": 100}`
+   - `POST https://api.openarg.org/api/v1/catalogo/agregar` con `{"tabla": "...", "operacion": "suma", "columna": "...", "agrupar_por": ["..."]}`
 4. Probá la conexión con `listar_fuentes`: cuenta como un pedido del modo datos y no gasta preguntas.
-5. Flujo recomendado: `buscar_datasets` → `describir_tabla` → `obtener_datos`. Usá `consultar_datos_publicos` sólo cuando la pregunta cruce varias tablas. Citá siempre la fuente (link oficial) que devuelve cada herramienta.
+5. Flujo recomendado: `buscar_datasets` → `describir_tabla` → `obtener_datos` (filas) o `agregar_datos` (totales, promedios, conteos, rankings: nunca sumes filas a mano). Usá `consultar_datos_publicos` sólo cuando la pregunta cruce varias tablas. Citá siempre la fuente (link oficial) que devuelve cada herramienta.
 
 ## Herramientas
 
 Modo datos (el modelo del usuario razona con las filas):
 
 - `buscar_datasets(texto, portal?, limite?)`: datasets con título, portal, link oficial y tablas consultables.
-- `describir_tabla(tabla)`: columnas con tipo, filas, período cubierto y muestra.
-- `obtener_datos(tabla, columnas?, desde?, hasta?, filtros?, orden?, limite?)`: filas en CSV con la fuente. Sin SQL: columnas, período AAAA[-MM[-DD]] y filtros de igualdad.
+- `describir_tabla(tabla)`: columnas con tipo, filas, período cubierto, frescura (cuándo la leyó OpenArg de su fuente, último dato, fecha de corte sólo si es una foto del período en curso; la fecha de lectura no es la de los datos) y muestra.
+- `obtener_datos(tabla, columnas?, desde?, hasta?, filtros?, orden?, limite?, offset?, columna_fecha?)`: filas en CSV con la fuente, en orden estable por fecha (sin columna de fecha, sólo en tablas de hasta 50.000 filas). Sin SQL: columnas, período AAAA[-MM[-DD]] y filtros con operador (=, !=, mayor_que, menor_que, >=, <=, contiene, en). Si hay más filas, da el `offset` de la página siguiente (hasta 10.000). `orden="desc"` trae primero lo más reciente.
+- `agregar_datos(tabla, operacion, columna?, agrupar_por?, filtros?, desde?, hasta?, ordenar_por?, orden?, limite?, ponderar_por?)`: suma, promedio, conteo, mínimo o máximo calculado en la base, agrupado hasta por 3 columnas (ranking de mayor a menor por defecto). Dice sobre cuántas filas se calculó; sin coincidencias no da un cero sino los valores que existen.
 - `listar_fuentes()`: portales cubiertos y cantidad de datasets.
 
 Modo respuestas (OpenArg razona):
 
-- `consultar_datos_publicos(pregunta: str)`: respuesta en Markdown con fuentes (link al portal oficial), advertencias y preguntas restantes. Descuenta 1 de las preguntas del mes.
+- `consultar_datos_publicos(pregunta: str)`: respuesta en Markdown con fuentes (link al portal oficial), advertencias y preguntas restantes. Cada respuesta descuenta 1 de las preguntas del mes; los errores, los cortes por tiempo y la misma pregunta repetida dentro de los 5 minutos no descuentan.
 
 ## Docs
 

@@ -1,0 +1,750 @@
+"""Variables del BCRA: la fuente oficial y más fresca de reservas, dólar
+oficial, tasas y base monetaria.
+
+Hasta el 04-oct el agente no tenía ninguna herramienta del BCRA. Para las
+reservas usaba Series de Tiempo, cuya serie curada terminaba en abril (y con
+la truncación a 1.000 filas llegó a contestar "abril de 2023"), y para el
+dólar oficial sólo DolarApi, que es la pizarra del Banco Nación servida por un
+agregador. La API de estadísticas v4 del BCRA publica al día hábil anterior y
+no pide token.
+
+"Dólar oficial" son las dos referencias del BCRA, con fecha (decisión de
+producto del 04-oct): el minorista promedio vendedor (variable 4) y el
+mayorista de referencia de la Comunicación A 3500 (variable 5).
+
+`variacion` (06-oct): "¿cuánto cambiaron las reservas y la base monetaria
+entre fin de 2025 y fin de agosto de 2026?" mostraba los dos saldos de la base
+y decía "no pude calcular" la variación (+10,46 %). La única herramienta que
+calculaba variaciones era series_tiempo, y su base monetaria está parada en la
+fuente (la mensual 331.1 llega a mayo de 2026 y la diaria 331.2 al 12 de
+junio); el prompt prohíbe la cuenta de cabeza. Se calcula acá, sobre los
+valores del BCRA, como la `variacion` de series_tiempo.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+from dataclasses import dataclass
+from datetime import date, datetime, timedelta, timezone
+from typing import Any
+
+from app.application.answers.tools.base import (
+    ToolContext,
+    ToolInputError,
+    ToolOutcome,
+    count,
+    int_arg,
+    quoted,
+    str_arg,
+    to_json,
+)
+from app.application.answers.tools.conectores import (
+    _STEP_MONTHS,
+    _leaves_period_open,
+    _pct,
+    _period_bounds,
+    _pick,
+)
+from app.domain.entities.connectors.data_result import DataResult
+from app.domain.exceptions.connector_errors import ConnectorError
+from app.domain.ports.llm.agent_llm import AgentTool
+
+logger = logging.getLogger(__name__)
+
+# Argentina no tiene horario de verano desde 2009. El servidor corre en UTC:
+# a las 22 h del domingo su "hoy" ya es el lunes.
+_AR = timezone(timedelta(hours=-3), "ART")
+
+_FUENTE = "Banco Central de la República Argentina (BCRA)"
+_MAX_VARIABLES = 5
+# Observaciones que se piden cuando no hay `desde`: alcanzan para el último
+# dato, para comparar con hace un par de meses y para el gráfico.
+_VENTANA_RECIENTE = 60
+# Valores publicados por adelantado que se le muestran al modelo (la UVA llega
+# hasta el día 15 del mes siguiente: unas 40 filas).
+_MAX_ADELANTADOS = 45
+# Lo que la herramienta espera al BCRA, con reintentos. El motor la corta a
+# los 25 s (agent_engine.TOOL_TIMEOUT_S) y ese corte el circuito no lo ve: el
+# adaptador corta antes y lo cuenta como falla (revisión del 05-oct, H090).
+_PLAZO_S = 20.0
+# Lo que lee el modelo si el BCRA no contesta. El genérico del motor ("Probá
+# con otra") lo mandaba a la pizarra del Banco Nación o a una serie atrasada,
+# presentadas como el dato oficial (H090).
+_SIN_RESPUESTA = (
+    "El BCRA no respondió (su API está caída o no contestó a tiempo). Decilo en la "
+    "respuesta. No presentes otra fuente como el dato oficial del BCRA: cotizaciones es "
+    "la pizarra del Banco Nación, no el dólar oficial, y series_tiempo puede estar "
+    "atrasada; si usás alguna, decí cuál es y de qué fecha es el dato."
+)
+
+
+@dataclass(frozen=True)
+class Variable:
+    id: int  # idVariable de la API v4 (verificado contra el catálogo el 04-oct)
+    titulo: str
+    corto: str  # para los pasos que ve el usuario
+    unidades: str
+    # Los valores ya vienen en puntos porcentuales (23,19 = 23,19 %). Va al
+    # contrato de metadatos (`unidad: "porcentaje"`) aunque el catálogo del
+    # BCRA, que también lo dice, no haya respondido.
+    porcentaje: bool = False
+
+
+# Las variables curadas. Los ids salen del catálogo v4
+# (`/estadisticas/v4.0/monetarias`), no de la v3: pueden cambiar entre
+# versiones. La inflación (27 y 28) queda afuera a propósito: es una copia del
+# IPC del INDEC, y una herramienta "oficial y más fresca" invitaría a citarla
+# como del BCRA.
+VARIABLES: dict[str, Variable] = {
+    "reservas": Variable(
+        1,
+        "Reservas internacionales del BCRA (saldo diario)",
+        "reservas internacionales",
+        "millones de dólares",
+    ),
+    "dolar_minorista": Variable(
+        4,
+        "Tipo de cambio minorista, promedio vendedor (BCRA)",
+        "dólar minorista",
+        "pesos por dólar",
+    ),
+    "dolar_mayorista": Variable(
+        5,
+        "Tipo de cambio mayorista de referencia, Comunicación A 3500 (BCRA)",
+        "dólar mayorista (A 3500)",
+        "pesos por dólar",
+    ),
+    "badlar": Variable(
+        7,
+        "Tasa BADLAR de bancos privados (BCRA)",
+        "tasa BADLAR",
+        "% nominal anual",
+        porcentaje=True,
+    ),
+    "tamar": Variable(
+        44,
+        "Tasa TAMAR de bancos privados (BCRA)",
+        "tasa TAMAR",
+        "% nominal anual",
+        porcentaje=True,
+    ),
+    "tasa_plazo_fijo": Variable(
+        12,
+        "Tasa de depósitos a plazo fijo a 30 días, promedio de entidades (BCRA)",
+        "tasa de plazo fijo",
+        "% nominal anual",
+        porcentaje=True,
+    ),
+    "base_monetaria": Variable(
+        15,
+        "Base monetaria (BCRA)",
+        "base monetaria",
+        "millones de pesos",
+    ),
+    "circulacion_monetaria": Variable(
+        16,
+        "Circulación monetaria (BCRA)",
+        "circulación monetaria",
+        "millones de pesos",
+    ),
+    "uva": Variable(
+        31,
+        "Unidad de Valor Adquisitivo, UVA (BCRA)",
+        "UVA",
+        "pesos",
+    ),
+    "cer": Variable(
+        30,
+        "Coeficiente de Estabilización de Referencia, CER (BCRA)",
+        "CER",
+        "índice, base 2/2/2002 = 1",
+    ),
+    "icl": Variable(
+        40,
+        "Índice para Contratos de Locación, ICL (BCRA)",
+        "índice de alquileres (ICL)",
+        "índice, base 30/6/2020 = 1",
+    ),
+    "banda_cambiaria_piso": Variable(
+        1187,
+        "Régimen de bandas cambiarias: límite inferior (BCRA)",
+        "piso de la banda cambiaria",
+        "pesos por dólar",
+    ),
+    "banda_cambiaria_techo": Variable(
+        1188,
+        "Régimen de bandas cambiarias: límite superior (BCRA)",
+        "techo de la banda cambiaria",
+        "pesos por dólar",
+    ),
+}
+
+
+def hoy_ar() -> date:
+    """La fecha de hoy en Argentina."""
+    return datetime.now(_AR).date()
+
+
+def _fecha_ar(iso: str | None) -> str:
+    """ "2026-09-30" → "30/09/2026"."""
+    if not iso or len(iso) < 10:
+        return iso or ""
+    return f"{iso[8:10]}/{iso[5:7]}/{iso[:4]}"
+
+
+def _date_arg(args: dict[str, Any], name: str) -> str | None:
+    value = str_arg(args, name, max_len=10)
+    if value is None:
+        return None
+    try:
+        return date.fromisoformat(value).isoformat()
+    except ValueError:
+        raise ToolInputError(f"`{name}` es una fecha AAAA-MM-DD.") from None
+
+
+def _keys(args: dict[str, Any]) -> list[str]:
+    raw = args.get("variables")
+    if isinstance(raw, str):
+        raw = [raw]
+    if not isinstance(raw, list) or not raw:
+        raise ToolInputError("`variables` es una lista de 1 a 5 variables.")
+    keys: list[str] = []
+    for item in raw:
+        key = str(item).strip().lower()
+        if key not in VARIABLES:
+            raise ToolInputError(
+                f"Variable desconocida {str(item)[:40]!r}. Son: {', '.join(VARIABLES)}."
+            )
+        if key not in keys:
+            keys.append(key)
+    if len(keys) > _MAX_VARIABLES:
+        raise ToolInputError(f"Pedí hasta {_MAX_VARIABLES} variables por vez.")
+    return keys
+
+
+def _agrupar(records: list[dict[str, Any]], width: int) -> list[dict[str, Any]]:
+    """Cierre, mínimo y máximo por período (``width`` 7 = mes, 4 = año)."""
+    grupos: dict[str, list[tuple[str, float]]] = {}
+    for r in records:
+        fecha, valor = str(r.get("fecha", "")), r.get("valor")
+        if len(fecha) >= width and isinstance(valor, int | float):
+            grupos.setdefault(fecha[:width], []).append((fecha, float(valor)))
+    out: list[dict[str, Any]] = []
+    for periodo, obs in sorted(grupos.items()):
+        valores = [v for _, v in obs]
+        out.append(
+            {
+                "periodo": periodo,
+                "cierre": obs[-1][1],
+                "fecha_cierre": obs[-1][0],
+                "minimo": min(valores),
+                "maximo": max(valores),
+            }
+        )
+    return out
+
+
+def _resumen(
+    records: list[dict[str, Any]], max_periodos: int
+) -> tuple[str, list[dict], str | None]:
+    """La historia en pocas líneas, calculada acá y no por el modelo.
+
+    Con `desde` llegan cientos de observaciones diarias y el modelo ve sólo
+    las últimas: para contar la evolución de un año pedía la misma serie tres
+    veces con otros rangos (medido en staging el 04-oct).
+
+    El anual se queda con los últimos ``max_periodos`` años, para que varias
+    variables entren en el tope de texto. Si recorta, el tercer valor es el
+    primer año leído, para decirlo; None si el resumen cubre todo (H089).
+    """
+    mensual = _agrupar(records, 7)
+    if len(mensual) <= max_periodos:
+        return "resumen_mensual", mensual, None
+    anual = _agrupar(records, 4)
+    if len(anual) <= max_periodos:
+        return "resumen_anual", anual, None
+    return "resumen_anual", anual[-max_periodos:], anual[0]["periodo"]
+
+
+def _separar_adelantados(
+    records: list[dict[str, Any]], today: date
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """(hasta hoy, posteriores a hoy). UVA, CER e ICL se publican por adelantado."""
+    hoy = today.isoformat()
+    al_dia = [r for r in records if str(r.get("fecha", "")) <= hoy]
+    adelantados = [r for r in records if str(r.get("fecha", "")) > hoy]
+    return al_dia, adelantados
+
+
+def _sin_adelantados(
+    result: DataResult, al_dia: list[dict[str, Any]], adelantados: list[dict[str, Any]]
+) -> None:
+    """Deja en la evidencia sólo lo que ya pasó.
+
+    El DataResult alimenta el gráfico del motor, el aviso de atraso y la
+    verificación de cifras: con los valores de días que no llegaron, el gráfico
+    de la UVA terminaba el 15-oct y ``ultima_observacion`` decía 15-oct un 05-oct.
+    Los adelantados quedan aparte, en la metadata y en lo que ve el modelo.
+    """
+    meta = result.metadata
+    ultima = str(al_dia[-1].get("fecha"))
+    result.records = al_dia
+    meta["total_records"] = len(al_dia)
+    meta["last_updated"] = ultima
+    meta["ultima_observacion"] = ultima
+    meta["publicado_hasta"] = str(adelantados[-1].get("fecha"))
+    meta["publicados_por_adelantado"] = adelantados
+    if str(meta.get("fecha_fin_fuente") or "") > ultima:
+        # La serie llega hasta hoy: lo posterior no es un dato que falte.
+        meta["fecha_fin_fuente"] = ultima
+
+
+def _recortar_adelantados(
+    adelantados: list[dict[str, Any]], max_adelantados: int
+) -> list[dict[str, Any]]:
+    """Los más cercanos y el último publicado."""
+    if len(adelantados) > max_adelantados:
+        return adelantados[: max_adelantados - 1] + adelantados[-1:]
+    return adelantados
+
+
+def _payload(
+    key: str,
+    var: Variable,
+    result: DataResult,
+    shown: int,
+    max_periodos: int,
+    adelantados: list[dict[str, Any]],
+    max_adelantados: int,
+    aviso: str | None = None,
+) -> dict:
+    """Una variable como la ve el modelo: el último dato con su fecha, arriba."""
+    records = result.records or []
+    meta = result.metadata or {}
+    ultimo = records[-1]
+    payload: dict[str, Any] = {
+        "variable": key,
+        "titulo": result.dataset_title,
+        "fuente": _FUENTE,
+        "unidades": var.unidades,
+        "frecuencia": meta.get("frecuencia") or "diaria",
+        "ultimo_dato": {"fecha": ultimo.get("fecha"), "valor": ultimo.get("valor")},
+        "filas_totales": len(records),
+        "filas": records[-shown:],
+    }
+    notas = [aviso] if aviso else []
+    leido_desde: str | None = None
+    if len(records) > shown:
+        nombre, resumen, leido_desde = _resumen(records, max_periodos)
+        payload[nombre] = resumen
+    if adelantados:
+        # El de hoy es el último que no es futuro; los que siguen ya los
+        # publicó el BCRA y sirven si preguntan por una fecha que viene.
+        adelantados = _recortar_adelantados(adelantados, max_adelantados)
+        payload["publicados_por_adelantado"] = adelantados
+        notas.append(
+            f"El BCRA ya publicó valores hasta el {_fecha_ar(adelantados[-1].get('fecha'))} "
+            "(se conocen por adelantado, van en `publicados_por_adelantado`); el de hoy es "
+            "`ultimo_dato`."
+        )
+    elif len(records) > shown:
+        cubre = "; el resumen cubre todo el período leído." if leido_desde is None else "."
+        notas.append(f"Se muestran las últimas {shown} de {len(records)} observaciones{cubre}")
+    if leido_desde is not None:
+        anual = payload["resumen_anual"]
+        payload["resumen_desde"] = anual[0]["periodo"]
+        notas.append(
+            f"El resumen anual va de {anual[0]['periodo']} a {anual[-1]['periodo']}: los años "
+            f"anteriores (se leyó desde {leido_desde}) no se muestran; para verlos, pedí esta "
+            "variable sola o con `hasta`."
+        )
+    if notas:
+        payload["nota"] = " ".join(notas)
+    return payload
+
+
+def _sin_dato_a_hoy(
+    key: str, var: Variable, adelantados: list[dict[str, Any]], max_adelantados: int
+) -> dict:
+    """Sólo llegaron valores de fechas que no pasaron: no hay `ultimo_dato`."""
+    return {
+        "variable": key,
+        "titulo": var.titulo,
+        "fuente": _FUENTE,
+        "unidades": var.unidades,
+        "ultimo_dato": None,
+        "filas": [],
+        "publicados_por_adelantado": _recortar_adelantados(adelantados, max_adelantados),
+        "nota": (
+            "El período pedido no tiene datos hasta hoy: lo que llegó son valores ya "
+            "publicados para fechas que todavía no pasaron (van en "
+            "`publicados_por_adelantado`) y no son el valor de hoy. Para el último dato, "
+            "pedí la variable sin `desde`."
+        ),
+    }
+
+
+async def _hasta_hoy(
+    bcra: Any, var: Variable, today: date, limit: int, plazo_s: float
+) -> DataResult | None:
+    """Las últimas observaciones hasta hoy; None si el BCRA no contestó a tiempo."""
+    if plazo_s < 1.0:
+        return None
+    try:
+        result: DataResult = await bcra.get_variable(
+            var.id, None, today.isoformat(), limit=limit, title=var.titulo, plazo_s=plazo_s
+        )
+    except ConnectorError:
+        return None
+    return result
+
+
+# ── variación entre dos períodos, calculada en código ──────
+
+# Observaciones que se piden por punta. Sin `desde`, el BCRA devuelve de la
+# más nueva a la más vieja hasta `hasta`: la primera ya es la del cierre.
+_POR_PUNTA = 10
+_CALCULO = (
+    "valor_hasta / valor_desde − 1 y valor_hasta − valor_desde, calculados por OpenArg sobre "
+    "los valores publicados por el BCRA"
+)
+
+
+async def _variacion(bcra: Any, keys: list[str], spec: Any, today: date) -> ToolOutcome:
+    """valor[hasta] / valor[desde] − 1 de cada variable, sobre los valores del BCRA.
+
+    Cada punta es el último dato publicado dentro de su período: «fin de
+    2025» (2025, 2025-12 o 2025-12-31) es el 30/12/2025, el último día hábil.
+    Se piden sólo las puntas, no todo el rango, y nunca después de hoy: la
+    UVA, el CER y el ICL se publican por adelantado.
+    """
+    if not isinstance(spec, dict):
+        raise ToolInputError("`variacion` es un objeto {desde, hasta}.")
+    desde = str_arg(spec, "desde", required=True, max_len=10) or ""
+    hasta = str_arg(spec, "hasta", required=True, max_len=10) or ""
+    base, fin = _period_bounds(desde), _period_bounds(hasta)
+    if base is None or fin is None:
+        raise ToolInputError("`desde` y `hasta` son AAAA, AAAA-MM o AAAA-MM-DD.")
+    if base[1] >= fin[0]:
+        raise ToolInputError("`desde` tiene que ser un período anterior a `hasta`.")
+    hoy = today.isoformat()
+    if fin[0] > hoy:
+        raise ToolInputError("`hasta` es un período que todavía no empezó.")
+
+    puntas = [(k, bounds) for k in keys for bounds in (base, fin)]
+    fetched = await asyncio.gather(
+        *(
+            bcra.get_variable(
+                VARIABLES[k].id,
+                None,
+                min(bounds[1], hoy),
+                limit=_POR_PUNTA,
+                title=VARIABLES[k].titulo,
+                plazo_s=_PLAZO_S,
+            )
+            for k, bounds in puntas
+        ),
+        return_exceptions=True,
+    )
+
+    filas: list[dict[str, Any]] = []
+    results: list[DataResult] = []
+    sin_dato: list[str] = []
+    abiertos: list[str] = []
+    failures = 0
+    for i, key in enumerate(keys):
+        var = VARIABLES[key]
+        inicio, final = fetched[2 * i], fetched[2 * i + 1]
+        if isinstance(inicio, BaseException) or isinstance(final, BaseException):
+            # Como en la consulta normal: el BCRA caído no tira abajo a las
+            # demás variables; un error nuestro sí sube.
+            for got in (inicio, final):
+                if isinstance(got, BaseException) and not isinstance(got, ConnectorError):
+                    raise got
+            failures += 1
+            filas.append({"variable": key, "error": "El BCRA no respondió."})
+            continue
+        meta = final.metadata or {}
+        step = _STEP_MONTHS.get(str(meta.get("frecuencia")))
+        p0 = _pick(inicio.records or [], "valor", base, step)
+        p1 = _pick(final.records or [], "valor", fin, step)
+        if p0 is None or p1 is None:
+            periodo, got = (desde, inicio) if p0 is None else (hasta, final)
+            previo = (got.records or [{}])[-1].get("fecha")
+            sin_dato.append(
+                f"{var.corto}: el BCRA no tiene dato para {periodo}"
+                + (f" (el último anterior es del {_fecha_ar(previo)})." if previo else ".")
+            )
+            continue
+        if p0[1] == 0:
+            sin_dato.append(f"{var.corto}: vale 0 en {p0[0]}, no tiene variación porcentual.")
+            continue
+        fila: dict[str, Any] = {
+            "serie": var.titulo,
+            "desde": p0[0],
+            "valor_desde": p0[1],
+            "hasta": p1[0],
+            "valor_hasta": p1[1],
+            "diferencia": round(p1[1] - p0[1], 4),
+            "variacion_pct": _pct(p1[1] / p0[1] - 1),
+        }
+        if _leaves_period_open(p1[0], step, fin[1]):
+            abiertos.append(p1[0])
+        results.append(
+            DataResult(
+                source="bcra",
+                portal_name=final.portal_name,
+                portal_url=final.portal_url,
+                dataset_title=f"Variación entre {p0[0]} y {p1[0]}: {var.titulo}",
+                format="json",
+                records=[fila],
+                metadata={
+                    "total_records": 1,
+                    "description": meta.get("description", ""),
+                    "units": f"variación en %; valores en {var.unidades}",
+                    "calculo": _CALCULO,
+                    # Contrato de frescura: el fin de la fuente es el del
+                    # BCRA, no la punta pedida (un período pasado no es un
+                    # dato atrasado).
+                    "ultima_observacion": p1[0],
+                    "frecuencia": meta.get("frecuencia") or "diaria",
+                    "fecha_fin_fuente": meta.get("fecha_fin_fuente"),
+                    "actualizada_en_fuente": None,
+                    "total_fuente": None,
+                    "truncada": False,
+                    "columnas_porcentaje": ["variacion_pct"],
+                    "oficial": True,
+                },
+            )
+        )
+        filas.append({"variable": key, "unidades": var.unidades, **fila})
+
+    if failures == len(keys):
+        logger.info("variables_bcra: el BCRA no respondió (%s)", ", ".join(keys))
+        return ToolOutcome(_SIN_RESPUESTA, is_error=True)
+    if not results:
+        raise ToolInputError(" ".join(sin_dato))
+    notas = [
+        "Cada punta es el último dato publicado dentro de su período: decí la fecha de cada "
+        "una (`desde` y `hasta`)."
+    ]
+    if abiertos:
+        notas.append(
+            f"El período final ({hasta}) no está completo: se usó el último dato publicado, del "
+            f"{_fecha_ar(max(abiertos))}. Decilo en la respuesta."
+        )
+    if any(VARIABLES[k].porcentaje for k in keys):
+        notas.append(
+            "En una tasa, `diferencia` está en puntos porcentuales y `variacion_pct` es el cambio "
+            "relativo de la tasa."
+        )
+    notas.extend(sin_dato)
+    respuesta: dict[str, Any] = {"aviso": _SIN_RESPUESTA} if failures else {}
+    respuesta.update(fuente=_FUENTE, calculo=_CALCULO, variaciones=filas, nota=" ".join(notas))
+    nombre = (
+        quoted(results[0].dataset_title.split(": ", 1)[-1], 80)
+        if len(results) == 1
+        else count(len(results), "variable", "variables")
+    )
+    return ToolOutcome(
+        to_json(respuesta), results=results, summary=f"Calculó la variación de {nombre} del BCRA"
+    )
+
+
+class VariablesBCRA:
+    status = "Consultando al BCRA..."
+
+    def describe(self, args: dict[str, Any]) -> str:
+        raw = args.get("variables")
+        names = [
+            VARIABLES[k].corto
+            for k in (raw if isinstance(raw, list) else [raw])
+            if isinstance(k, str) and k in VARIABLES
+        ]
+        if not names:
+            return self.status
+        if isinstance(args.get("variacion"), dict):
+            return f"Calculando la variación en el BCRA: {', '.join(names)}"
+        return f"Consultando al BCRA: {', '.join(names)}"
+
+    spec = AgentTool(
+        name="variables_bcra",
+        description=(
+            "Variables oficiales del Banco Central (API de estadísticas del BCRA). Es la "
+            "fuente oficial y la más fresca (publica el día hábil anterior) para reservas "
+            "internacionales, dólar oficial, tasas de interés y base monetaria: para el valor "
+            "de hoy o reciente de esos indicadores usala antes que series_tiempo o "
+            "cotizaciones. Dólar oficial: pedí dolar_minorista (promedio vendedor de las "
+            "entidades) y dolar_mayorista (referencia Comunicación A 3500) y da los dos, cada "
+            "uno con su fecha. Reservas: saldo diario en millones de dólares. Variables: "
+            "reservas, dolar_minorista, dolar_mayorista, badlar, tamar, tasa_plazo_fijo (30 "
+            "días), base_monetaria, circulacion_monetaria, uva, cer, icl (índice de contratos "
+            "de alquiler), banda_cambiaria_piso, banda_cambiaria_techo. Devuelve por variable "
+            "el último dato con su fecha, las últimas observaciones y un resumen por mes (o por "
+            "año) con cierre, mínimo y máximo; con `desde` el resumen cubre todo el período "
+            "(con varias variables y muchos años, el anual muestra los últimos y "
+            "`resumen_desde` dice desde cuál). `variacion` calcula en código cuánto cambió cada "
+            "variable entre dos períodos (valor de `hasta` / valor de `desde` − 1, y la "
+            "diferencia), con el último dato publicado de cada período: usala para "
+            "variaciones punta a punta (p. ej. de fin de 2024 a fin de junio de 2025: "
+            "desde=2024-12, hasta=2025-06). Para inflación usá las series del INDEC "
+            "(series_tiempo)."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "variables": {
+                    "type": "array",
+                    "items": {"type": "string", "enum": list(VARIABLES)},
+                    "minItems": 1,
+                    "maxItems": _MAX_VARIABLES,
+                },
+                "desde": {"type": "string", "description": "AAAA-MM-DD"},
+                "hasta": {"type": "string", "description": "AAAA-MM-DD"},
+                "ultimos": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 120,
+                    "description": "Cuántas observaciones finales mostrar (por defecto 10).",
+                },
+                "variacion": {
+                    "type": "object",
+                    "description": "Variación entre dos períodos, calculada sobre los valores.",
+                    "properties": {
+                        "desde": {
+                            "type": "string",
+                            "description": "Período base: AAAA, AAAA-MM o AAAA-MM-DD.",
+                        },
+                        "hasta": {
+                            "type": "string",
+                            "description": "Período final: AAAA, AAAA-MM o AAAA-MM-DD.",
+                        },
+                    },
+                    "required": ["desde", "hasta"],
+                },
+            },
+            "required": ["variables"],
+        },
+    )
+
+    async def run(self, args: dict[str, Any], ctx: ToolContext) -> ToolOutcome:
+        keys = _keys(args)
+        today = hoy_ar()
+        if args.get("variacion") is not None:
+            # Las puntas salen de `variacion`; `desde`/`hasta` no se usan.
+            return await _variacion(ctx.deps.bcra, keys, args["variacion"], today)
+        desde = _date_arg(args, "desde")
+        hasta = _date_arg(args, "hasta")
+        if desde and desde > today.isoformat():
+            raise ToolInputError("`desde` no puede ser una fecha futura.")
+        if desde and hasta and desde > hasta:
+            raise ToolInputError("`desde` tiene que ser anterior a `hasta`.")
+        ultimos = int_arg(args, "ultimos", 10, 1, 120)
+        # Que entren todas en el tope de texto de la herramienta.
+        shown = min(ultimos, max(10, 200 // len(keys)))
+        max_periodos = max(12, 36 // len(keys))
+        max_adelantados = max(10, _MAX_ADELANTADOS // len(keys))
+
+        bcra = ctx.deps.bcra
+        loop = asyncio.get_running_loop()
+        vence = loop.time() + _PLAZO_S
+        limit = max(ultimos, _VENTANA_RECIENTE)
+        fetched = await asyncio.gather(
+            *(
+                bcra.get_variable(
+                    VARIABLES[k].id,
+                    desde,
+                    hasta,
+                    limit=limit,
+                    title=VARIABLES[k].titulo,
+                    plazo_s=_PLAZO_S,
+                )
+                for k in keys
+            ),
+            return_exceptions=True,
+        )
+
+        payloads: list[dict[str, Any]] = []
+        results: list[DataResult] = []
+        failures = 0
+        for key, got in zip(keys, fetched, strict=True):
+            var = VARIABLES[key]
+            if isinstance(got, BaseException):
+                # Una variable que no respondió no tira abajo a las demás; un
+                # error nuestro (no del BCRA) sí sube.
+                if not isinstance(got, ConnectorError):
+                    raise got
+                failures += 1
+                payloads.append({"variable": key, "error": "El BCRA no respondió."})
+                continue
+            if not got.records:
+                payloads.append({"variable": key, "filas": [], "nota": "Sin datos en ese período."})
+                continue
+            al_dia, adelantados = _separar_adelantados(got.records, today)
+            aviso: str | None = None
+            if adelantados and not al_dia:
+                # Un fin de semana o feriado, con `desde` = hoy, de las bandas
+                # (publicadas por adelantado, sólo días hábiles) llegaban sólo
+                # fechas futuras, y el techo de fin de mes salía como el de hoy
+                # (revisión del 05-oct, H088). El de hoy es el último hasta hoy.
+                previo = await _hasta_hoy(bcra, var, today, limit, vence - loop.time())
+                al_dia = _separar_adelantados(previo.records, today)[0] if previo else []
+                if previo is None or not al_dia:
+                    payloads.append(_sin_dato_a_hoy(key, var, adelantados, max_adelantados))
+                    continue
+                got = previo
+                aviso = (
+                    "El período pedido no tiene datos hasta hoy (fin de semana o feriado): "
+                    f"`ultimo_dato` es el último publicado, del {_fecha_ar(al_dia[-1]['fecha'])}, "
+                    "y las `filas` son anteriores a lo pedido."
+                )
+            meta = got.metadata
+            meta["units"] = meta.get("units") or var.unidades
+            meta["frecuencia"] = meta.get("frecuencia") or "diaria"
+            meta["oficial"] = True
+            if var.porcentaje:
+                meta["unidad"] = "porcentaje"
+            if adelantados:
+                _sin_adelantados(got, al_dia, adelantados)
+            payloads.append(
+                _payload(key, var, got, shown, max_periodos, adelantados, max_adelantados, aviso)
+            )
+            results.append(got)
+
+        if failures == len(keys):
+            # No sube como ConnectorError: el motor le diría al modelo "Probá
+            # con otra" y nada más (H090).
+            logger.info("variables_bcra: el BCRA no respondió (%s)", ", ".join(keys))
+            return ToolOutcome(_SIN_RESPUESTA, is_error=True)
+        # El aviso va primero: el tope de texto corta por el final.
+        respuesta: dict[str, Any] = {"aviso": _SIN_RESPUESTA} if failures else {}
+        respuesta["variables"] = payloads
+        return ToolOutcome(
+            to_json(respuesta),
+            results=results,
+            summary=_summary(results, today),
+        )
+
+
+def _summary(results: list[DataResult], today: date) -> str:
+    if not results:
+        return "El BCRA no tiene datos de ese período"
+    # El último dato de cada variable (sin los publicados por adelantado). Si
+    # no coinciden (reservas al 30/09, dólar al 02/10), no se muestra uno solo.
+    lasts = {
+        max(
+            (
+                str(r.get("fecha"))
+                for r in res.records or []
+                if str(r.get("fecha", "")) <= today.isoformat()
+            ),
+            default="",
+        )
+        for res in results
+    }
+    latest = lasts.pop() if len(lasts) == 1 else ""
+    when = f" (último dato: {_fecha_ar(latest)})" if latest else ""
+    if len(results) == 1:
+        return f"Leyó {quoted(results[0].dataset_title, 80)} del BCRA{when}"
+    return f"Leyó {count(len(results), 'variable', 'variables')} del BCRA{when}"

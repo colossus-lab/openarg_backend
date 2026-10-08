@@ -1,28 +1,90 @@
 from __future__ import annotations
 
+import logging
 import re
+import time
+from collections.abc import Sequence
+from typing import Any
 
-from sqlalchemy import text
+from sqlalchemy import Row, TextClause, text
 
 from app.domain.ports.search.vector_search import IVectorSearch, SearchResult
 from app.infrastructure.persistence_sqla.provider import MainAsyncSession
+
+logger = logging.getLogger(__name__)
 
 
 class PgVectorSearchAdapter(IVectorSearch):
     _RETRIEVAL_VECTOR_ONLY = "vector_only"
     _RETRIEVAL_HYBRID_FULL = "hybrid_full"
 
-    # Chunks fetched through the HNSW index before grouping by dataset. The
-    # catalog repeats datasets (the datos.gob.ar migration regenerated ids),
-    # so it takes a few hundred chunks to yield a few dozen distinct ones.
-    _ANN_MIN_CANDIDATES = 200
-    _ANN_CANDIDATES_PER_RESULT = 10
-    # pgvector's ceiling for hnsw.ef_search.
-    _ANN_MAX_CANDIDATES = 1000
+    # hnsw.ef_search for every ANN search, whatever the limit.
+    #
+    # It was max(200, limit*10), 200 for the MCP and the agent, and at 200
+    # the walk got stuck in clusters of near-identical documents built from
+    # one template (Córdoba municipalities' "Transparencia activa", one
+    # "Presupuesto APN" per year): on 2026-10-04 prod's "salario mínimo vital
+    # y móvil" topped at 0.517 with five Córdoba municipalities while the
+    # exact search puts SMVM first (0.746).
+    #
+    # #131 raised it to 1000, and at 1000 there was no walk at all. pgvector's
+    # cost estimate grows with ef_search, and past ~400 on staging (76k
+    # chunks) and ~600 on prod (102k) the planner prefers a parallel seq scan
+    # of dataset_chunks (EXPLAIN, 2026-10-05): the "index search" read the
+    # same 350k buffers as the exact one. Its recall of 1.0 was brute force,
+    # at 2.2 s median with 8 concurrent searches on staging (69-86 ms at 200)
+    # and 10.1 s cold on prod.
+    #
+    # 300 is under both thresholds, and the walk no longer depends on them
+    # (``_walk_index`` keeps it on the index). With the iterative scan the
+    # width that matters is the candidates', not the frontier's: with the
+    # index forced, recall@10 against the exact search over the canary's 20
+    # queries on staging was 0.915 at ef_search 40 and the same at 1000
+    # (2026-10-05).
+    _ANN_EF_SEARCH = 300
+    # Chunks fetched through the index before grouping by dataset (about 3
+    # per dataset, and the MCP asks for up to 100 datasets). With the
+    # iterative scan the walk goes on past ef_search until it has this many,
+    # up to hnsw.max_scan_tuples (20,000 by default); without it (pgvector
+    # before 0.8) one scan stops at ef_search.
+    #
+    # This is the recall/latency knob, and 1000 is a trade, not a free lunch.
+    # Staging, 2026-10-07, 36 real queries, recall against the exact search
+    # counting ties, as served (fall back included, it ran 0 times), and the
+    # walk alone with 8 searches at once (warm cache):
+    #
+    #   candidates        recall@32  recall@40  p95 with 8
+    #   400 (main, prod)  0.904      0.909      63 ms
+    #   1000              0.942      0.943      101-184 ms
+    #   2000              0.949      0.950      237-263 ms
+    #   4000              0.973      0.977      558 ms
+    #   8000              1.000      0.999      938 ms
+    #   exact (#131)      1.0        1.0        2.2 s median (2026-10-05)
+    #
+    # What 1000 misses is in the graph but far along the walk: groups of
+    # datasets with (almost) the same vector (30 Córdoba "Listado de agentes
+    # del Poder Ejecutivo" at 0.663, 28 "Elecciones legislativas Entre Ríos
+    # 2013" at 0.627) and re-embedded chunks, reached after 4000-8000
+    # tuples. Three of the 36 queries lose half or more of their top 32, and
+    # their best score (0.607-0.643) is above _ANN_WEAK_TOP_SCORE, so
+    # ``search_datasets_ann`` serves them as they are. 1000 keeps the most
+    # room under 8 at once (prod has a third more chunks than staging); a
+    # wider walk buys recall with latency, a REINDEX is not measured to help.
+    _ANN_CANDIDATES = 1000
+    # A best score under this is not trusted and the exact search runs
+    # instead. With Cohere v3 an unrelated dataset scores 0.50-0.57 and a
+    # genuine match 0.60-0.77; the trapped walks above topped at 0.48-0.52.
+    # Weak queries ("dólar oficial" 0.557) stay just above it, so the exact
+    # search is the exception and not the rule.
+    _ANN_WEAK_TOP_SCORE = 0.55
 
-    # pgvector version, read once per process: iterative index scans (needed
-    # to filter by portal inside the index scan) exist from 0.8.0 on.
+    # pgvector version, read once per process: iterative index scans exist
+    # from 0.8.0 on.
     _pgvector_version: tuple[int, ...] | None = None
+
+    # Portals in the catalogue, read at most once an hour per process.
+    _PORTALS_TTL_S = 3600
+    _portals: tuple[float, list[str]] | None = None
 
     def __init__(self, session: MainAsyncSession) -> None:
         self._session = session
@@ -50,6 +112,23 @@ class PgVectorSearchAdapter(IVectorSearch):
             cls._pgvector_version = tuple(int(p) for p in re.findall(r"\d+", str(raw or "0")))
         return cls._pgvector_version >= (0, 8)
 
+    async def known_portals(self) -> list[str]:
+        """Distinct `datasets.portal` values (38 in prod), cached per process.
+
+        Only asked when a portal-filtered search comes back empty: an unknown
+        portal ("INDEC", "datos.gob.ar") empties the filter and the search
+        used to answer an empty list with a 200, which the MCP showed as "no
+        encontré datasets".
+        """
+        cls = type(self)
+        now = time.monotonic()
+        if cls._portals is None or now - cls._portals[0] > self._PORTALS_TTL_S:
+            rows = await self._session.execute(
+                text("SELECT DISTINCT portal FROM datasets WHERE portal IS NOT NULL ORDER BY 1")
+            )
+            cls._portals = (now, [str(r[0]) for r in rows.fetchall()])
+        return list(cls._portals[1])
+
     async def search_datasets_ann(
         self,
         query_embedding: list[float],
@@ -57,49 +136,122 @@ class PgVectorSearchAdapter(IVectorSearch):
         portal_filter: str | None = None,
         min_similarity: float = 0.40,
     ) -> list[SearchResult]:
-        """Approximate nearest neighbours through the HNSW index.
+        """Nearest datasets: the HNSW index, checked, with the exact search behind it.
+
+        What every caller uses (``/catalogo/buscar`` for the MCP, the agent's
+        ``buscar_datos``, ``/data/search``). The index answers first
+        (``search_datasets_hnsw``, a walk of the graph and never a scan of
+        the table); its answer is distrusted, and the exact search
+        (``search_datasets_exact``, the only one that reads every chunk) runs
+        instead, when it brings fewer datasets than asked for or its best
+        score is weak. A trapped walk does not come back empty: it comes back
+        full of the wrong neighbours with low scores, which is the signal
+        checked here.
+
+        What the check does not see: neighbours the walk never reaches while
+        it brings good ones. Those answers are served, so what callers get is
+        not the exact search's answer (recall@40 0.943 against it on staging,
+        2026-10-07; see ``_ANN_CANDIDATES``).
+
+        Before pgvector 0.8 there is no iterative scan, and an index scan
+        filtered by portal can come back empty for a small portal; with a
+        portal filter the exact search, which the filter keeps small, runs
+        directly.
+        """
+        if portal_filter and not await self._supports_iterative_scan():
+            return await self.search_datasets_exact(
+                query_embedding, limit, portal_filter, min_similarity
+            )
+
+        t0 = time.perf_counter()
+        hits = await self.search_datasets_hnsw(
+            query_embedding, limit, portal_filter, min_similarity
+        )
+        hnsw_ms = (time.perf_counter() - t0) * 1000
+        reason = self._distrust_reason(hits, limit)
+        if reason is None:
+            logger.info(
+                "search_datasets_ann: hnsw hits=%d top=%.3f ms=%.0f",
+                len(hits),
+                hits[0].score,
+                hnsw_ms,
+            )
+            return hits
+
+        t1 = time.perf_counter()
+        exact = await self.search_datasets_exact(
+            query_embedding, limit, portal_filter, min_similarity
+        )
+        logger.info(
+            "search_datasets_ann: hnsw→exacta (%s) hits=%d→%d top=%.3f→%.3f hnsw_ms=%.0f exact_ms=%.0f",
+            reason,
+            len(hits),
+            len(exact),
+            hits[0].score if hits else 0.0,
+            exact[0].score if exact else 0.0,
+            hnsw_ms,
+            (time.perf_counter() - t1) * 1000,
+        )
+        return exact
+
+    @classmethod
+    def _distrust_reason(cls, hits: list[SearchResult], limit: int) -> str | None:
+        """Why the index's answer should not be served, or ``None`` if it can."""
+        if len(hits) < limit:
+            return "pocos"
+        if hits[0].score < cls._ANN_WEAK_TOP_SCORE:
+            return "puntaje bajo"
+        return None
+
+    async def search_datasets_hnsw(
+        self,
+        query_embedding: list[float],
+        limit: int = 10,
+        portal_filter: str | None = None,
+        min_similarity: float = 0.40,
+    ) -> list[SearchResult]:
+        """Approximate nearest neighbours through the HNSW index, unchecked.
 
         ``ORDER BY embedding <=> q LIMIT n`` is what the index answers; a
         similarity threshold in the WHERE clause is not, and turns the search
         into a scan of every chunk (staging, 76k chunks: 9-16 s and up to the
-        60 s statement timeout for ``search_datasets``, 0.3-1.6 s here, same
-        top 20). Grouping by dataset and the threshold apply afterwards.
+        60 s statement timeout for ``search_datasets``). Grouping by dataset
+        and the threshold apply afterwards.
 
         Two pgvector settings make the index return what the query asks for:
 
-        - ``hnsw.ef_search`` caps how many rows one index scan returns (40 by
-          default). Left at 40, ``LIMIT 200`` yields 40 chunks, and for
-          "personas con discapacidad" none of the right datasets.
-        - With a portal filter, ``hnsw.iterative_scan`` keeps scanning until
-          enough chunks of that portal turn up. Filtering after the fetch
-          instead returned nothing for small portals (caba, neuquen_legislatura)
-          even with 1000 candidates. Before pgvector 0.8 there is no iterative
-          scan; the exact search, which a portal filter keeps small, is used.
+        - ``hnsw.ef_search`` is the size of the walk's frontier and, without
+          an iterative scan, the ceiling on the rows one index scan returns
+          (40 by default). See ``_ANN_EF_SEARCH``.
+        - ``hnsw.iterative_scan`` keeps scanning when the first pass falls
+          short. It is what brings the candidates past ef_search (1000
+          chunks against a frontier of 300), and with a portal filter what
+          finds the portal's chunks behind closer ones of other portals
+          (filtering after the fetch returned nothing for caba and
+          neuquen_legislatura even with 1000 candidates).
 
-        Both are set with ``is_local`` and end with the transaction.
+        Both are set with ``is_local`` and end with the transaction. The walk
+        itself runs through ``_walk_index``, which keeps the planner off a
+        seq scan. Public so the recall canary can compare the index alone
+        against the exact search; callers that serve results use
+        ``search_datasets_ann``.
         """
-        if portal_filter and not await self._supports_iterative_scan():
-            return await self.search_datasets(query_embedding, limit, portal_filter, min_similarity)
-
-        candidates = min(
-            max(self._ANN_MIN_CANDIDATES, limit * self._ANN_CANDIDATES_PER_RESULT),
-            self._ANN_MAX_CANDIDATES,
-        )
         await self._session.execute(
-            text("SELECT set_config('hnsw.ef_search', :ef, true)"), {"ef": str(candidates)}
+            text("SELECT set_config('hnsw.ef_search', :ef, true)"),
+            {"ef": str(self._ANN_EF_SEARCH)},
         )
-        embedding_str = "[" + ",".join(str(v) for v in query_embedding) + "]"
+        if await self._supports_iterative_scan():
+            await self._session.execute(
+                text("SELECT set_config('hnsw.iterative_scan', 'relaxed_order', true)")
+            )
         params: dict = {
-            "embedding": embedding_str,
-            "candidates": candidates,
+            "embedding": self._literal(query_embedding),
+            "candidates": self._ANN_CANDIDATES,
             "min_sim": min_similarity,
             "limit": limit,
         }
         portal_clause = ""
         if portal_filter:
-            await self._session.execute(
-                text("SELECT set_config('hnsw.iterative_scan', 'relaxed_order', true)")
-            )
             portal_clause = (
                 " WHERE dc.dataset_id IN (SELECT id FROM datasets WHERE portal = :portal)"
             )
@@ -112,16 +264,108 @@ class PgVectorSearchAdapter(IVectorSearch):
             f"{portal_clause}"
             " ORDER BY dc.embedding <=> CAST(:embedding AS vector)"
             " LIMIT :candidates"
-            ")"
-            " SELECT CAST(d.id AS text) AS dataset_id, d.title, d.description, d.portal,"
-            "        d.download_url, d.columns, 1 - min(nn.dist) AS score"
-            " FROM nn JOIN datasets d ON d.id = nn.dataset_id"
-            " GROUP BY d.id"
+            "), best AS ("
+            " SELECT nn.dataset_id, min(nn.dist) AS dist"
+            " FROM nn"
+            " GROUP BY nn.dataset_id"
             " HAVING 1 - min(nn.dist) >= :min_sim"
-            " ORDER BY score DESC"
+            " ORDER BY min(nn.dist), nn.dataset_id"
             " LIMIT :limit"
+            ")"
+            f"{self._RESULT_SELECT}"
         )
-        result = await self._session.execute(query, params)
+        return self._results(await self._walk_index(query, params))
+
+    async def _walk_index(self, query: TextClause, params: dict) -> Sequence[Row[Any]]:
+        """Run the index walk with sequential scans off, then put them back.
+
+        Reading every chunk is ``search_datasets_exact``'s job, and it runs
+        only when the index's answer is distrusted; the walk must not do it
+        on its own. Left to the planner it does: the choice between the
+        index and a parallel seq scan moves with ef_search and with the
+        table's size (1000 crossed it on staging and prod, see
+        ``_ANN_EF_SEARCH``), and the recall canary then compares the exact
+        search against itself. With a portal filter the planner still picks
+        between the index and the btree on ``dataset_id``; only the scan of
+        the whole table is off.
+
+        ``enable_seqscan`` goes back to the value it had right after the
+        fetch, before anything else runs in the transaction: the agent shares
+        it across a whole turn, and the exact search has to scan. A failed or
+        cancelled walk skips that, and the rollback the transaction needs
+        anyway (``reset``) undoes the local setting with it.
+        """
+        before = (
+            await self._session.execute(text("SELECT current_setting('enable_seqscan')"))
+        ).scalar()
+        await self._session.execute(text("SELECT set_config('enable_seqscan', 'off', true)"))
+        rows = (await self._session.execute(query, params)).fetchall()
+        await self._session.execute(
+            text("SELECT set_config('enable_seqscan', :before, true)"),
+            {"before": str(before or "on")},
+        )
+        return rows
+
+    async def search_datasets_exact(
+        self,
+        query_embedding: list[float],
+        limit: int = 10,
+        portal_filter: str | None = None,
+        min_similarity: float = 0.40,
+    ) -> list[SearchResult]:
+        """The true nearest datasets: every chunk, by its distance to the query.
+
+        Grouping by dataset with ``min(distance)`` is a shape the HNSW index
+        cannot answer, so Postgres scans the table; there is no need for
+        ``SET LOCAL enable_indexscan = off``, which would stay on for the rest
+        of a transaction the agent shares across a whole turn. Measured on
+        2026-10-04: 0.45 s on staging (76k chunks, p95 0.73 s) and 0.71-0.77 s
+        on prod (112k, parallel seq scan); cold on prod the same scan took
+        10.1 s and read ~885 MB (2026-10-05), and with 8 at once on staging
+        2.2 s median. That is why it runs only behind the index. Unlike
+        ``search_datasets`` it keeps the threshold out of the WHERE and does
+        not window over every chunk.
+        """
+        params: dict = {
+            "embedding": self._literal(query_embedding),
+            "min_sim": min_similarity,
+            "limit": limit,
+        }
+        portal_clause = ""
+        if portal_filter:
+            portal_clause = (
+                " WHERE dc.dataset_id IN (SELECT id FROM datasets WHERE portal = :portal)"
+            )
+            params["portal"] = portal_filter
+        query = text(
+            "WITH best AS ("
+            " SELECT dc.dataset_id, min(dc.embedding <=> CAST(:embedding AS vector)) AS dist"
+            " FROM dataset_chunks dc"
+            f"{portal_clause}"
+            " GROUP BY dc.dataset_id"
+            " HAVING 1 - min(dc.embedding <=> CAST(:embedding AS vector)) >= :min_sim"
+            " ORDER BY 2, dc.dataset_id"
+            " LIMIT :limit"
+            ")"
+            f"{self._RESULT_SELECT}"
+        )
+        return self._results((await self._session.execute(query, params)).fetchall())
+
+    # Shared tail of the HNSW and exact searches: only the `limit` datasets
+    # that survived are joined, not every chunk the scan touched.
+    _RESULT_SELECT = (
+        " SELECT CAST(d.id AS text) AS dataset_id, d.title, d.description, d.portal,"
+        "        d.download_url, d.columns, 1 - best.dist AS score"
+        " FROM best JOIN datasets d ON d.id = best.dataset_id"
+        " ORDER BY best.dist, best.dataset_id"
+    )
+
+    @staticmethod
+    def _literal(query_embedding: list[float]) -> str:
+        return "[" + ",".join(str(v) for v in query_embedding) + "]"
+
+    @staticmethod
+    def _results(rows: Sequence[Row[Any]]) -> list[SearchResult]:
         return [
             SearchResult(
                 dataset_id=row.dataset_id,
@@ -132,7 +376,7 @@ class PgVectorSearchAdapter(IVectorSearch):
                 columns=row.columns or "",
                 score=float(row.score),
             )
-            for row in result.fetchall()
+            for row in rows
         ]
 
     async def search_datasets(
