@@ -1,30 +1,15 @@
 from __future__ import annotations
 
 import logging
-import os
 
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
 from app.infrastructure.auth import GoogleJwtValidator, InvalidGoogleToken
+from app.presentation.http.middleware.public_paths import PUBLIC_PATHS, SERVICE_PREFIXES
 
 logger = logging.getLogger(__name__)
-
-# /ask, /fuentes y /catalogo/* hacen su propia auth con la clave `oarg_sk_` del usuario.
-_ALWAYS_PUBLIC = frozenset(
-    {
-        "/health",
-        "/health/ready",
-        "/api/v1/ask",
-        "/api/v1/fuentes",
-        "/api/v1/catalogo/buscar",
-        "/api/v1/catalogo/tabla",
-        "/api/v1/catalogo/datos",
-    }
-)
-_SERVICE_PREFIXES = ("/api/v1/data/", "/api/v1/admin/")
-_DEV_PUBLIC = frozenset({"/docs", "/openapi.json", "/redoc"})
 
 # FR-007a: admin-gated endpoints are exempt from Google JWT validation.
 # They already require ``X-API-Key`` (APIKeyMiddleware) plus ``X-Admin-Key``
@@ -39,9 +24,6 @@ _ADMIN_ONLY_PATHS = frozenset(
         "/api/v1/transparency/flush-cache",
     }
 )
-
-_env = os.getenv("APP_ENV", "local").lower()
-_PUBLIC_PATHS = _ALWAYS_PUBLIC | _DEV_PUBLIC if _env != "prod" else _ALWAYS_PUBLIC
 
 
 def get_request_user_email(request: Request) -> str:
@@ -87,9 +69,9 @@ class GoogleJwtAuthMiddleware(BaseHTTPMiddleware):
 
         path = request.url.path
         if (
-            path in _PUBLIC_PATHS
+            path in PUBLIC_PATHS
             or path in _ADMIN_ONLY_PATHS
-            or any(path.startswith(p) for p in _SERVICE_PREFIXES)
+            or any(path.startswith(p) for p in SERVICE_PREFIXES)
         ):
             return await call_next(request)
 

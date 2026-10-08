@@ -13,26 +13,23 @@ graph TD
 
 ## Config Hierarchy
 
-
-
 ```
 config/
-├── local/
-│   ├── config.toml       # Local dev settings
-│   └── .secrets.toml     # API keys (gitignored)
-├── dev/
-│   └── config.toml       # Development server
-├── prod/
-│   └── config.toml       # Production
-└── test/
-    └── config.toml       # Test suite
+├── local/config.toml     # Local dev (Postgres on localhost:5435, as in docker-compose.yaml)
+├── dev/config.toml       # Development server
+├── prod/config.toml      # Production (the real DSN comes from DATABASE_URL)
+├── test/config.toml      # Test suite
+├── marts/*.yaml          # Mart definitions (copied into every image)
+└── curated_sources.json  # Curated sources loaded by refresh_curated_sources
 ```
 
-The active environment is set via `APP_ENV` (default: `local`).
+`.secrets.toml` next to each `config.toml` is optional and gitignored. The active environment is set via `APP_ENV` (`local`, `dev`, `prod`, `test`; default `local`; any other value raises at startup).
+
+Many runtime switches are not in the TOML at all: they are read straight from the environment with `os.getenv` where they are used (answer engine, verifier, quotas, beat, ingestion knobs). They are listed under [Environment Variables](#environment-variables).
 
 ## Settings Structure
 
-All settings are Pydantic models defined in `setup/config/settings.py`.
+All settings are Pydantic models defined in `src/app/setup/config/settings.py`.
 
 ### AppSettings (root)
 
@@ -55,15 +52,13 @@ class AppSettings:
 | Field | Type | Default | Env Override |
 |-------|------|---------|-------------|
 | `USER` | str | `"postgres"` | `DATABASE_URL` (full DSN) |
-| `PASSWORD` | str | `"postgres"` | |
+| `PASSWORD` | str | `""` | |
 | `DB` | str | `"openarg_db"` | |
 | `HOST` | str | `"localhost"` | |
-| `PORT` | int | `5435` | |
-| `DRIVER` | str | `"postgresql+psycopg"` | |
+| `PORT` | int | `5432` | |
+| `DRIVER` | str | `"psycopg"` | |
 
-The `dsn` property builds: `{DRIVER}://{USER}:{PASSWORD}@{HOST}:{PORT}/{DB}`
-
-If `DATABASE_URL` env var is set, it overrides the entire DSN.
+The `dsn` property builds `postgresql+{DRIVER}://{USER}:{PASSWORD}@{HOST}:{PORT}/{DB}`. If `DATABASE_URL` is set, it overrides the entire DSN.
 
 ### SqlaEngineSettings
 
@@ -71,33 +66,42 @@ If `DATABASE_URL` env var is set, it overrides the entire DSN.
 |-------|------|---------|-------------|
 | `ECHO` | bool | `false` | Log all SQL |
 | `ECHO_POOL` | bool | `false` | Log connection pool events |
-| `POOL_SIZE` | int | `5` | Connection pool size |
+| `POOL_SIZE` | int | `20` | Connection pool size |
 | `MAX_OVERFLOW` | int | `10` | Max extra connections |
 
 ### AgentSettings
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `EMBEDDING_MODEL` | str | `"cohere.embed-multilingual-v3"` | Bedrock embedding model |
-| `EMBEDDING_DIMENSIONS` | int | `1024` | Vector dimensions |
-| `MAX_CONCURRENT_COLLECTORS` | int | `5` | Max parallel collector tasks |
-| `SANDBOX_TIMEOUT_SECONDS` | int | `30` | SQL sandbox timeout (seconds) |
+| `EMBEDDING_MODEL` | str | `"cohere.embed-multilingual-v3"` | Not read by the embedding provider (see below) |
+| `EMBEDDING_DIMENSIONS` | int | `1024` | Passed to the Bedrock embedding adapter, which does not use it: Cohere v3 returns 1024 dimensions |
+| `MAX_CONCURRENT_COLLECTORS` | int | `5` | |
+| `SANDBOX_TIMEOUT_SECONDS` | int | `30` | |
+
+The TOML files still set `[agents] EMBEDDING_MODEL = "gemini-embedding-001"` and `EMBEDDING_DIMENSIONS = 768`. Neither changes anything: the embedding provider uses `bedrock.EMBEDDING_MODEL` (`provider_registry.py`), and the vector columns are `vector(1024)` since migration 0024.
 
 ### ScraperSettings
 
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `DATOS_GOB_AR_BASE_URL` | str | `"https://datos.gob.ar/api/3/action"` | CKAN API |
-| `CABA_BASE_URL` | str | `"https://data.buenosaires.gob.ar/api/3/action"` | CKAN API |
-| `SCRAPE_INTERVAL_HOURS` | int | `12` | Auto-scrape interval |
+| Field | Type | Default |
+|-------|------|---------|
+| `DATOS_GOB_AR_BASE_URL` | str | `"https://datos.gob.ar/api/3/action"` |
+| `CABA_BASE_URL` | str | `"https://data.buenosaires.gob.ar/api/3/action"` |
+| `SCRAPE_INTERVAL_HOURS` | int | `24` (the actual schedule is the beat's: one `scrape-<portal>` entry per portal, daily) |
+| `SERIES_TIEMPO_BASE_URL` | str | `"https://apis.datos.gob.ar/series/api"` |
+| `ARGENTINA_DATOS_BASE_URL` | str | `"https://api.argentinadatos.com/v1"` |
+| `GEOREF_BASE_URL` | str | `"https://apis.datos.gob.ar/georef/api"` |
 
 ### SecuritySettings
 
-| Field | Type | Default | Description |
+| Field | Type | Default | Env Override |
 |-------|------|---------|-------------|
-| `JWT_SECRET_KEY` | str | — | JWT signing key |
+| `JWT_SECRET_KEY` | str | `""` | |
 | `JWT_ALGORITHM` | str | `"HS256"` | |
 | `ACCESS_TOKEN_EXPIRE_MINUTES` | int | `60` | |
+| `REFRESH_TOKEN_EXPIRE_DAYS` | int | `7` | |
+| `BACKEND_API_KEY` | str | `""` | `BACKEND_API_KEY` |
+| `CORS_ALLOWED_ORIGINS` | list | `[]` | `CORS_ALLOWED_ORIGINS` (comma-separated) |
+| `GOOGLE_OAUTH_CLIENT_ID` | str | `""` | `GOOGLE_OAUTH_CLIENT_ID` |
 
 ### LoggingSettings
 
@@ -105,30 +109,26 @@ If `DATABASE_URL` env var is set, it overrides the entire DSN.
 |-------|------|---------|
 | `LEVEL` | str | `"INFO"` |
 
-### API Key Secrets
-
-Set via `.secrets.toml` or environment variables:
-
-| Setting | Env Variable | Used By |
-|---------|-------------|---------|
-| `bedrock.REGION` | `AWS_REGION` | AWS Bedrock region (default: us-east-1) |
-| `bedrock.LLM_MODEL` | `BEDROCK_LLM_MODEL` | Bedrock LLM model (default: claude-3-5-haiku) |
-| `bedrock.LLM_MODEL_DEEP` | `BEDROCK_LLM_MODEL_DEEP` | Model used only by deep search (default: same as `LLM_MODEL`) |
-| `bedrock.EMBEDDING_MODEL` | `BEDROCK_EMBEDDING_MODEL` | Bedrock embedding model (default: cohere.embed-multilingual-v3) |
-| `gemini.API_KEY` | `GEMINI_API_KEY` | LLM (Gemini 2.5 Flash, optional) |
-| `anthropic.API_KEY` | `ANTHROPIC_API_KEY` | LLM fallback (Claude Sonnet via Anthropic API) |
-| `s3.BUCKET` | `S3_BUCKET` | S3 bucket for dataset storage |
-
-## Environment-Specific Configs
-
 ### BedrockSettings
 
 | Field | Type | Default | Env Override |
 |-------|------|---------|-------------|
 | `REGION` | str | `"us-east-1"` | `AWS_REGION` |
-| `LLM_MODEL` | str | `"anthropic.claude-3-5-haiku-20241022-v1:0"` | `BEDROCK_LLM_MODEL` |
+| `LLM_MODEL` | str | `"us.anthropic.claude-haiku-4-5-20251001-v1:0"` | `BEDROCK_LLM_MODEL` |
 | `LLM_MODEL_DEEP` | str | falls back to `LLM_MODEL` | `BEDROCK_LLM_MODEL_DEEP` |
+| `AGENT_MODEL` | str | `"us.anthropic.claude-sonnet-4-6"` | `BEDROCK_AGENT_MODEL` |
 | `EMBEDDING_MODEL` | str | `"cohere.embed-multilingual-v3"` | `BEDROCK_EMBEDDING_MODEL` |
+
+`LLM_MODEL` is the legacy engine's model (wrapped with the Gemini fallback) and the default of the workers' LLM tasks; `AGENT_MODEL` is the agent engine's (`ANSWERS_ENGINE=agent`), called through the Anthropic SDK's `AsyncAnthropicBedrock`.
+
+### GeminiSecrets / AnthropicSecrets
+
+| Field | Default | Env Override | Used by |
+|-------|---------|-------------|---------|
+| `gemini.API_KEY` | `""` | `GEMINI_API_KEY` | Fallback of the Bedrock LLM adapter (legacy engine) |
+| `gemini.MODEL` | `"gemini-2.5-flash"` | `GEMINI_MODEL` | |
+| `anthropic.API_KEY` | `""` | `ANTHROPIC_API_KEY` | Nothing: `AnthropicAdapter` exists but is not wired in `provider_registry.py` |
+| `anthropic.MODEL` | `"claude-sonnet-4-20250514"` | `ANTHROPIC_MODEL` | |
 
 ### S3Settings
 
@@ -139,71 +139,112 @@ Set via `.secrets.toml` or environment variables:
 
 ## Environment-Specific Configs
 
-### Local (`config/local/config.toml`)
+What differs between the TOML files (see the files for the rest):
 
-```toml
-[app]
-DEBUG = true
-
-[postgres]
-HOST = "localhost"
-PORT = 5435
-DB = "openarg_db"
-
-[sqla]
-ECHO = true
-POOL_SIZE = 5
-```
-
-### Dev (`config/dev/config.toml`)
-
-```toml
-
-[sqla]
-POOL_SIZE = 30
-
-[scraper]
-SCRAPE_INTERVAL_HOURS = 12
-```
-
-### Prod (`config/prod/config.toml`)
-
-```toml
-[sqla]
-POOL_SIZE = 20
-
-[scraper]
-SCRAPE_INTERVAL_HOURS = 24
-```
+| Setting | local | dev | prod | test |
+|---------|-------|-----|------|------|
+| `postgres.HOST:PORT` | `localhost:5435` | `postgres:5432` | `localhost:5432` (overridden by `DATABASE_URL`) | `localhost:5432` |
+| `postgres.DB` | `openarg_db` | `openarg_db` | `openarg_db` | `openarg_test` |
+| `sqla.ECHO` | `true` | `false` | `false` | `false` |
+| `sqla.POOL_SIZE` / `MAX_OVERFLOW` | 10 / 5 | 30 / 15 | 20 / 10 | 5 / — |
+| `logs.LEVEL` | `DEBUG` | `INFO` | `INFO` | `WARNING` |
 
 ## Environment Variables
 
-These override TOML settings:
+These override TOML settings or are read directly by the code. Names only. The tables use the name the app reads; on the servers some of them are built by `docker-compose.prod.yml` from other variables of the `.env` (see [On the servers](#on-the-servers-docker-composeprodyml)).
+
+### Core
 
 | Variable | Description | Required |
 |----------|-------------|----------|
-| `APP_ENV` | Environment (local/dev/prod/test) | No (default: local) |
-| `DATABASE_URL` | Full PostgreSQL DSN | No (overrides postgres config) |
-| `CELERY_BROKER_URL` | Redis broker URL | Yes (for workers) |
-| `CELERY_RESULT_BACKEND` | Redis results URL | Yes (for workers) |
-| `REDIS_CACHE_URL` | Redis cache URL | Yes |
-| `AWS_REGION` | AWS region for Bedrock | No (default: us-east-1) |
-| `AWS_ACCESS_KEY_ID` | AWS credentials | Yes (for Bedrock + S3) |
-| `AWS_SECRET_ACCESS_KEY` | AWS credentials | Yes (for Bedrock + S3) |
-| `BEDROCK_LLM_MODEL` | Bedrock LLM model ID | No (default: claude-3-5-haiku) |
-| `BEDROCK_LLM_MODEL_DEEP` | Model for deep search only. Left unset, deep search runs on the same model as everything else, so the feature costs nothing extra. Point it at a more capable model (a Sonnet inference profile) to make it do something. Whichever you pick, confirm the account can actually invoke it — a profile can be listed as ACTIVE and still be denied at invocation | No (default: `BEDROCK_LLM_MODEL`) |
-| `BEDROCK_EMBEDDING_MODEL` | Bedrock embedding model ID | No (default: cohere.embed-multilingual-v3) |
-| `GEMINI_API_KEY` | Google AI API key | No (optional, if using Gemini) |
-| `ANTHROPIC_API_KEY` | Anthropic API key | No (fallback LLM) |
-| `S3_BUCKET` | S3 bucket for datasets | No (default: openarg-datasets) |
-| `OPENARG_BEAT_DESACTIVADAS` | Entradas del beat que no se agendan, separadas por comas: las claves de `beat_schedule` (p. ej. `ingest-series-tiempo,check-series-freshness,snapshot-bcra`), no los nombres de las tareas. Sirve para desplegar sin que esas tareas corran solas y correrlas a mano cuando se decida. Se lee al crear la app de Celery, así que va en el `.env` que comparten el beat y los workers (los workers la usan para no esperar el latido de una tarea frenada) y toma efecto al reiniciarlos. Un nombre que no existe sale como `ERROR` en el log y no frena nada. Ver `docs/deploy-produccion.md` | No (default: vacía, la agenda entera) |
+| `APP_ENV` | Environment (`local`/`dev`/`prod`/`test`) | No (default: `local`) |
+| `DATABASE_URL` | Full PostgreSQL DSN | No (overrides postgres config). Built by the compose on the servers |
+| `SANDBOX_DATABASE_URL` | DSN of the read-only role the SQL sandbox uses | Yes in prod. Built by the compose on the servers |
+| `CELERY_BROKER_URL` / `CELERY_RESULT_BACKEND` | Redis broker and results | Yes (for workers) |
+| `REDIS_CACHE_URL` | Redis cache, quotas and rate limits | Yes (default `redis://localhost:6379/2`) |
+| `LOG_LEVEL`, `SENTRY_DSN` | Logging level, error tracking | No |
+
+### Answers and models
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `ANSWERS_ENGINE` | `legacy` (LangGraph graph) or `agent` (tool-using agent). Read on every turn; an unknown value logs `ERROR` and uses `legacy` | `legacy` |
+| `ANSWERS_VERIFY_MODE` | Figure verifier: `off`, `shadow` (log only) or `correct` (cite only what was used, one corrective round, notice for unbacked figures) | `shadow` |
+| `AWS_REGION` | AWS region for Bedrock and S3 | `us-east-1` |
+| `BEDROCK_AGENT_MODEL` | Agent model | `us.anthropic.claude-sonnet-4-6` |
+| `BEDROCK_LLM_MODEL` | Legacy engine and worker LLM tasks | `us.anthropic.claude-haiku-4-5-20251001-v1:0` |
+| `BEDROCK_LLM_MODEL_DEEP` | Legacy deep mode only. Left unset, deep mode runs on the same model as everything else. Whichever you pick, confirm the account can actually invoke it — a profile can be listed as ACTIVE and still be denied at invocation | `BEDROCK_LLM_MODEL` |
+| `BEDROCK_MODEL_ID` | Old name read first by `analyst_tasks` and `catalog_enrichment_tasks` (`constants.bedrock_llm_model`) | unset |
+| `BEDROCK_EMBEDDING_MODEL` | Embedding model | `cohere.embed-multilingual-v3` |
+| `GEMINI_API_KEY`, `GEMINI_MODEL` | Fallback of the legacy LLM | `gemini-2.5-flash` |
+| `S3_BUCKET` | S3 bucket for original files | `openarg-datasets` |
+
+**AWS credentials.** No client is built with explicit keys: boto3 and `AsyncAnthropicBedrock` use the default credential chain, so on the servers the EC2 instance role provides them and the `.env` needs no keys. `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` still work (for example, locally), since the chain reads them first.
+
+### Auth
+
+| Variable | Description |
+|----------|-------------|
+| `BACKEND_API_KEY` | Shared service key the frontend sends in `X-API-Key`. When set, `APIKeyMiddleware` protects every non-public route |
+| `GOOGLE_OAUTH_CLIENT_ID` | Enables `GoogleJwtAuthMiddleware` (user's Google ID token in `Authorization: Bearer`). Mandatory in prod: the app refuses to start without it. On the servers the `.env` carries `GOOGLE_CLIENT_ID` instead, and the compose passes it under this name |
+| `ADMIN_API_KEY` | `X-Admin-Key` for `/api/v1/admin/*` and the transparency POSTs. Mandatory in prod and must differ from `BACKEND_API_KEY` |
+| `DATA_SERVICE_TOKEN` | Bearer token of the internal `/api/v1/data/*` API |
+| `CORS_ALLOWED_ORIGINS` | Comma-separated origins |
+
+Both middlewares let through, without the service key or the Google token, the paths in `presentation/http/middleware/public_paths.py`: `/health`, `/health/ready` and the public API (`PUBLIC_API_PATHS`: `/api/v1/ask`, `/api/v1/fuentes`, `/api/v1/catalogo/buscar`, `/api/v1/catalogo/tabla`, `/api/v1/catalogo/datos`, `/api/v1/catalogo/agregar`), plus `/docs`, `/openapi.json` and `/redoc` outside prod; `/api/v1/data/*` and `/api/v1/admin/*` have their own auth.
+
+### Public API, MCP and web quotas
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `PUBLIC_API_MONTHLY_PREGUNTAS` / `PUBLIC_API_MONTHLY_DATOS` | Free monthly questions (`/ask`) / data-mode requests (`/catalogo/*`, `/fuentes`) per person | 10 / 200 |
+| `PUBLIC_API_FOUNDER_PREGUNTAS` / `PUBLIC_API_FOUNDER_DATOS` | Same, for Fundadores | 100 / 2000 |
+| `PUBLIC_API_GLOBAL_DAILY_CAP` | Free-plan questions per day for everybody together (Bedrock spend ceiling) | 300 |
+| `PUBLIC_API_IP_DAILY_LIMIT` | Questions per day per client IP | 30 |
+| `PUBLIC_API_USER_UNBILLED_DAILY_LIMIT` | Unbilled model runs (timeout, error, clarification, empty answer) per person per UTC day | 20 |
+| `PUBLIC_API_TIMEOUT_SECONDS` | Turn timeout of `/ask`; keep it below the MCP's timeout minus 10 s | 30 |
+| `PUBLIC_API_COST_PER_ANSWER_USD` | Per-answer cost estimate used by `/admin/analytics/mcp/overview` | 0.034 |
+| `PUBLIC_WEB_MONTHLY_PREGUNTAS` / `PUBLIC_WEB_FOUNDER_PREGUNTAS` | Web chat monthly questions | 30 / 100 |
+| `PUBLIC_WEB_GLOBAL_DAILY_CAP` | Web chat answers per day for everybody together | 1000 |
+| `BACKEND_URL`, `MCP_ALLOWED_HOSTS`, `MCP_BACKEND_TIMEOUT_SECONDS` | Public MCP container (see `mcp_publico/README.md`) | `http://backend:8080`, see README, 75 |
+
+`PUBLIC_API_CATALOG_DAILY_LIMIT`, still in `.env.example`, is not read by the code: the data-mode limits are the monthly quota above plus 30 requests per minute (`api_key_service.CATALOG_MINUTE_LIMIT`).
+
+### Workers, beat and ingestion
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `OPENARG_BEAT_DESACTIVADAS` | Entradas del beat que no se agendan, separadas por comas: las claves de `beat_schedule` (p. ej. `ingest-series-tiempo,check-series-freshness,snapshot-bcra`), no los nombres de las tareas. Sirve para desplegar sin que esas tareas corran solas y correrlas a mano cuando se decida. Se lee al crear la app de Celery, así que va en el `.env` que comparten el beat y los workers (los workers la usan para no esperar el latido de una tarea frenada) y toma efecto al reiniciarlos. Un nombre que no existe sale como `ERROR` en el log y no frena nada. Ver `docs/deploy-produccion.md` | vacía (la agenda entera) |
+| `OPENARG_ENABLE_STARTUP_BOOTSTRAP` | Dispatch the initial scrape / bulk collect when a worker starts | off |
+| `OPENARG_COLLECTOR_CONCURRENCY` | Concurrency of `worker-collector` in `docker-compose.prod.yml` | 8 |
+| `OPENARG_HEAVY_COLLECT_QUEUE` / `OPENARG_HEAVY_RETRY_QUEUE` | Queue names of the heavy collectors | `collector-heavy` / `collector-heavy-retry` |
+| `OPENARG_HEADER_FROM_DATA_SEVERITY` | Severity of the "header taken from data" detector: `critical` hides the table from the sandbox while the finding is open; `warn` only records it | `critical` |
+| `OPENARG_MART_MAX_UNION_TABLES` | Cap of `live_tables_by_*` macros in mart YAMLs | 200 |
+| `OPENARG_TELEGRAM_TOKEN`, `OPENARG_TELEGRAM_CHAT_ID` | Destination of the quality alerts | unset (no alerts sent) |
+| `SANDBOX_MAX_ROWS`, `SANDBOX_TIMEOUT_MS`, `SANDBOX_TABLE_PREFIX`, `INJECTION_THRESHOLD`, `CACHE_SIMILARITY_THRESHOLD` | Security tuning (see `.env.example`) | |
+
+The collector and parser have many more `OPENARG_*` knobs (download size caps, chunk sizes, heavy routing); grep `os.getenv("OPENARG_` under `src/app/infrastructure/celery/tasks/` for the full list.
+
+### On the servers (`docker-compose.prod.yml`)
+
+The compose uses the server `.env` twice: as the `env_file:` of the backend, the workers, beat and the frontend, and to fill the `${…}` of the `environment:` blocks. `environment:` wins over `env_file:`, so for these variables what the app gets is what the compose builds, whatever the `.env` says under the same name:
+
+| The app reads | The compose builds it from (variables of the `.env`) |
+|---------------|------------------------------------------------------|
+| `GOOGLE_OAUTH_CLIENT_ID` (backend, `worker-collector`, `worker-ingest`, `worker-s3`) | `GOOGLE_CLIENT_ID`, the same Google client the frontend uses (`${GOOGLE_CLIENT_ID:-}`: empty if missing, and then the backend does not start in prod) |
+| `DATABASE_URL` | `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB`, through PgBouncer (which reaches `POSTGRES_HOST`) |
+| `SANDBOX_DATABASE_URL` (backend) | Role `openarg_sandbox_ro` with `POSTGRES_PASSWORD`, `POSTGRES_HOST`, `POSTGRES_DB` |
+| `CELERY_BROKER_URL`, `CELERY_RESULT_BACKEND` (backend, workers, beat), `REDIS_CACHE_URL` (backend) | `REDIS_PASSWORD` |
+| `MCP_ALLOWED_HOSTS` (mcp) | `MCP_DOMAIN` (default `mcp.openarg.org`, which the `Caddyfile` also reads) plus the internal hosts |
+| `APP_ENV` | Fixed to `prod` in every service that runs the app, on staging and prod alike |
+
+The compose also passes `BACKEND_API_KEY` (backend), and `AWS_REGION`, `S3_BUCKET` and the AWS key variables (empty unless set) to the backend, the collectors, `worker-ingest` and `worker-s3`, under their own names. `.env.example` uses the compose's names (`GOOGLE_CLIENT_ID`, `POSTGRES_*`, `REDIS_PASSWORD`) but does not list `POSTGRES_HOST`, which pgbouncer and the sandbox DSN need; its `SANDBOX_DATABASE_URL` is overwritten by the compose.
 
 ## Config Loading
 
-The `load_settings()` function in `setup/config/settings.py`:
+`load_settings()` in `setup/config/settings.py`:
 
 1. Reads `APP_ENV` (default `"local"`).
 2. Loads `config/{env}/config.toml`.
-3. Merges `config/{env}/.secrets.toml` (if exists).
-4. Applies environment variable overrides.
-5. Returns `AppSettings` Pydantic model.
+3. Merges `config/{env}/.secrets.toml` (if it exists).
+4. Builds the `AppSettings` Pydantic model; each section applies its environment-variable overrides in `model_post_init`.
