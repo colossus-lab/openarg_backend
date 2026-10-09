@@ -46,6 +46,17 @@ logger = logging.getLogger(__name__)
 
 TABLA = "raw.cache_ddjj_declaraciones"
 TABLA_BIENES = "raw.cache_ddjj_bienes"
+TABLA_ACTIVIDADES = "raw.cache_ddjj_actividades"
+URL_ACTIVIDADES = (
+    "https://datos.jus.gob.ar/dataset/"
+    "declaraciones-juradas-de-actividades-anteriores-y-posteriores-a-la-funcion-publica"
+)
+_TIPOS_ACTIVIDAD = {
+    "relacion_dependencia": "empleo en relación de dependencia",
+    "trabajo_independiente": "trabajo independiente",
+    "funcion_publica": "cargo público",
+    "ad_honorem": "actividad ad honorem",
+}
 
 FUENTE_OA = "oficina_anticorrupcion"
 FUENTE_CABA = "caba"
@@ -691,4 +702,91 @@ class DDJJAdapter:
                 "una inicial lo declarado es al inicio; en las demás, al cierre. Los montos son "
                 "nominales, sin ajustar por inflación."
             ),
+        )
+
+    async def actividades(
+        self,
+        *,
+        persona: str | None = None,
+        entidad: str | None = None,
+        momento: str | None = None,
+        limite: int = 40,
+    ) -> DataResult:
+        """Dónde trabajaba una autoridad antes de asumir y adónde fue al irse (DDJJ de
+        actividades, sistema MAPPAP de la OA), por persona o por entidad."""
+        params: dict[str, Any] = {"lim": limite}
+        condiciones = []
+        if persona:
+            condiciones.append(self._condicion_nombre(persona, params))
+        if entidad:
+            columna = (
+                "regexp_replace(" + _SIN_TILDES.format(col="entidad") + ", '[^A-Z0-9 ]+', ' ', 'g')"
+            )
+            opciones = []
+            for i, grupo in enumerate(organismos.alternativas_texto_libre(entidad)):
+                partes = []
+                for j, expresion in enumerate(grupo):
+                    params[f"ent{i}_{j}"] = expresion
+                    partes.append(f"{columna} ~ :ent{i}_{j}")
+                opciones.append("(" + " AND ".join(partes) + ")")
+            condiciones.append("(" + " OR ".join(opciones) + ")" if opciones else "false")
+        if momento in ("anterior", "posterior"):
+            params["momento"] = momento
+            condiciones.append("momento = :momento")
+        if not condiciones:
+            condiciones.append("false")
+        donde = " AND ".join(condiciones)
+        filas = await self._filas(
+            f"SELECT * FROM {TABLA_ACTIVIDADES} WHERE {donde} "
+            "ORDER BY nombre, momento, desde DESC NULLS LAST LIMIT :lim",
+            params,
+        )
+        [conteo] = await self._filas(
+            f"SELECT count(*) AS n, count(DISTINCT cuit) AS personas FROM {TABLA_ACTIVIDADES} "
+            f"WHERE {donde}",
+            params,
+        )
+        records = [
+            {
+                "nombre": f["nombre"] or "",
+                "cuit": f["cuit"],
+                "momento": "antes de asumir" if f["momento"] == "anterior" else "al irse",
+                "cargo_publico": f["cargo"] or "",
+                "organismo": f["organismo"] or "",
+                "tipo_actividad": _TIPOS_ACTIVIDAD.get(f["tipo"], f["tipo"]),
+                "entidad": f["entidad"],
+                "entidad_cuit": f["entidad_cuit"] or "",
+                "sector": f["sector"] or "",
+                "puesto": f["puesto"] or "",
+                "desde": f["desde"].isoformat() if f["desde"] else None,
+                "hasta": f["hasta"].isoformat() if f["hasta"] else None,
+                "sigue": f["continua"],
+                "fecha_declaracion": f["fecha_documento"].isoformat()
+                if f["fecha_documento"]
+                else None,
+            }
+            for f in filas
+        ]
+        buscado = ", ".join(x for x in (persona, entidad) if x)
+        return DataResult(
+            source="ddjj:actividades",
+            portal_name="Declaraciones Juradas de actividades — Oficina Anticorrupción",
+            portal_url=URL_ACTIVIDADES,
+            dataset_title=f'Actividades anteriores y posteriores: "{buscado}"',
+            format="json",
+            records=records,
+            metadata={
+                "total_records": len(records),
+                "actividades_totales": int(conteo["n"]),
+                "personas": int(conteo["personas"]),
+                "fetched_at": datetime.now(UTC).isoformat(),
+                "description": (
+                    "Actividades declaradas por autoridades nacionales al asumir (antes de asumir) y "
+                    "al irse (al irse), desde 2022: empleos, trabajos independientes, cargos públicos "
+                    "anteriores y actividades ad honorem. Es lo que la persona declaró; no dice nada "
+                    f"sobre conflictos de interés. {int(conteo['n'])} actividades de "
+                    f"{int(conteo['personas'])} personas coinciden"
+                    + (f"; se muestran {len(records)}." if len(records) < int(conteo["n"]) else ".")
+                ),
+            },
         )

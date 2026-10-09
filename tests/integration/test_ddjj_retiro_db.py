@@ -34,7 +34,9 @@ _OA_CATALOGO = "zz_justicia__declaraciones_juradas_patrimoniales_int__test__v1"
 _OA_HUERFANA = "zz_datos_gob_ar__declaraciones_juradas_patrimoniales__d6_stest"
 _CABA = "zz_caba__declaraciones_juradas__test__v1"
 _ARSAT = "zz_datos_gob_ar__declaraciones_juradas_patrimoniales__arsattest__v4"
-_TODAS = (_OA_CATALOGO, _OA_HUERFANA, _CABA, _ARSAT)
+# un pedazo viejo de actividades anteriores y posteriores, sin catálogo
+_ACT_HUERFANA = "zz_datos_gob_ar__declaraciones_juradas_de_actividad__6fa_stest"
+_TODAS = (_OA_CATALOGO, _OA_HUERFANA, _CABA, _ARSAT, _ACT_HUERFANA)
 
 
 def _engine_or_skip():
@@ -76,13 +78,21 @@ def entorno(monkeypatch):
                     "INCLUDING DEFAULTS INCLUDING CONSTRAINTS INCLUDING INDEXES)"
                 )
             )
-        for tabla in (dt.TABLA_DECLARACIONES, dt.TABLA_BIENES, dt.TABLA_DEUDAS):
+        for tabla in (
+            dt.TABLA_DECLARACIONES,
+            dt.TABLA_BIENES,
+            dt.TABLA_DEUDAS,
+            dt.TABLA_ACTIVIDADES,
+        ):
             conn.execute(text(f'DROP TABLE IF EXISTS raw."{tabla}"'))
             conn.execute(text(f'CREATE TABLE raw."{tabla}" ({dt._DDL[tabla]})'))
         conn.execute(text(f'CREATE TABLE raw."{_OA_CATALOGO}" ({oa_cols})'))
         conn.execute(text(f'CREATE TABLE raw."{_OA_HUERFANA}" ({oa_cols})'))
         conn.execute(text(f'CREATE TABLE raw."{_CABA}" (informacion text, valor text)'))
         conn.execute(text(f'CREATE TABLE raw."{_ARSAT}" ("Apellido" text, "Nombre" text)'))
+        conn.execute(
+            text(f'CREATE TABLE raw."{_ACT_HUERFANA}" (cuit_cuil text, cargo_jurisdiccion text)')
+        )
         oa = _dataset(conn, "justicia", _OA_TITULO)
         caba = _dataset(conn, "caba", "Declaraciones Juradas")
         arsat = _dataset(conn, "datos_gob_ar", "Declaraciones Juradas Patrimoniales")
@@ -105,7 +115,13 @@ def entorno(monkeypatch):
             )
     yield engine, {"oa": oa, "caba": caba, "arsat": arsat}
     with engine.begin() as conn:
-        for tabla in (*_TODAS, dt.TABLA_DECLARACIONES, dt.TABLA_BIENES, dt.TABLA_DEUDAS):
+        for tabla in (
+            *_TODAS,
+            dt.TABLA_DECLARACIONES,
+            dt.TABLA_BIENES,
+            dt.TABLA_DEUDAS,
+            dt.TABLA_ACTIVIDADES,
+        ):
             conn.execute(text(f'DROP TABLE IF EXISTS raw."{tabla}"'))
         conn.execute(
             text("DELETE FROM public.raw_table_versions WHERE resource_identity LIKE 'zz::%'")
@@ -128,18 +144,18 @@ def test_la_simulacion_lista_y_no_toca_nada(entorno):
     engine, _ = entorno
     resumen = dt.retirar(engine, dry_run=True)
     nombres = " ".join(resumen["borraria"])
-    for tabla in (_OA_CATALOGO, _OA_HUERFANA, _CABA):
+    for tabla in (_OA_CATALOGO, _OA_HUERFANA, _CABA, _ACT_HUERFANA):
         assert tabla in nombres
     assert _ARSAT not in nombres and "cache_ddjj" not in nombres
-    assert resumen["por_firma"] == 1 and resumen["por_catalogo"] == 2
+    assert resumen["por_firma"] == 2 and resumen["por_catalogo"] == 2
     assert all(_existe(engine, t) for t in _TODAS)
 
 
 def test_el_retiro_borra_con_su_registro_y_deja_arsat(entorno):
     engine, ids = entorno
     resumen = dt.retirar(engine, dry_run=False)
-    assert resumen["borradas"] == 3 and resumen["fallidas"] == []
-    assert not any(_existe(engine, t) for t in (_OA_CATALOGO, _OA_HUERFANA, _CABA))
+    assert resumen["borradas"] == 4 and resumen["fallidas"] == []
+    assert not any(_existe(engine, t) for t in (_OA_CATALOGO, _OA_HUERFANA, _CABA, _ACT_HUERFANA))
     assert _existe(engine, _ARSAT) and _existe(engine, dt.TABLA_DECLARACIONES)
     with engine.connect() as conn:
         vivas = (
@@ -163,7 +179,7 @@ def test_el_retiro_borra_con_su_registro_y_deja_arsat(entorno):
             text("SELECT count(*) FROM cache_drop_audit WHERE reason = 'reemplazada_por_ddjj'")
         ).scalar()
     assert vivas == [_ARSAT] and catalogo == [_ARSAT]
-    assert auditadas == 3
+    assert auditadas == 4
 
 
 def test_sin_las_tablas_propias_no_retira_nada(entorno):

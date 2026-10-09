@@ -115,7 +115,7 @@ Tools (`answers/tools/`, built by `build_tools`; a tool whose dependency is miss
 | `obtener_datos` | Sandbox (`consultas/`) | Read rows with period, filters and order (no SQL from the model) |
 | `calcular` | Sandbox (`consultas/agregar`) | Sum, count, average, min/max with grouping, filters and survey weights |
 | `cotizaciones` | DolarApi / ArgentinaDatos | Non-official dollar quotes (blue, MEP, CCL…) and country risk |
-| `declaraciones_juradas` | `raw.cache_ddjj_*`: Oficina Anticorrupción (national officials, 2012 onwards) and City of Buenos Aires (2023 onwards) asset declarations | Search, year-by-year evolution, rankings and statistics filtered by year, branch, agency or position |
+| `declaraciones_juradas` | `raw.cache_ddjj_*`: Oficina Anticorrupción (national officials, 2012 onwards) and City of Buenos Aires (2023 onwards) asset declarations | Search, year-by-year evolution, rankings and statistics filtered by year, branch, agency or position; prior and later jobs of national authorities (`actividades`) |
 | `sesiones` | Chamber of Deputies session transcripts (vector search) | What was said about a topic, attributed to the speaker |
 | `personal_legislativo` | HCDN payroll (database) | Staff per legislator, changes, totals |
 | `ubicar_lugar` | Georef | Normalize a place name (never cited as a source) |
