@@ -162,3 +162,30 @@ def condicion(texto: str) -> Condicion:
         # son sólo letras y números, no hay nada que escapar.
         regex.append(rf"\m{palabra}" if len(palabra) >= 5 else rf"\m{palabra}\M")
     return Condicion(regex=tuple(regex))
+
+
+_NOMBRES: dict[str, tuple[str, ...]] = {}
+for _canonico, (_alias, _patrones) in _DEFINICIONES.items():
+    _todos = tuple(dict.fromkeys(_clave(n) for n in (_canonico, *_alias)))
+    for _nombre in _todos:
+        _NOMBRES[_nombre] = _todos
+
+
+def _palabras_enteras(texto: str) -> tuple[str, ...]:
+    palabras = [p for p in texto.split() if p not in _VACIAS] or texto.split()
+    return tuple(rf"\m{p}" if len(p) >= 5 else rf"\m{p}\M" for p in palabras[:6])
+
+
+def alternativas_texto_libre(texto: str) -> list[tuple[str, ...]]:
+    """Para un campo escrito a mano (el empleador de una DDJJ de actividades): una
+    lista de alternativas, cada una con regex que tienen que coincidir todas.
+
+    Una sigla conocida vale por cualquiera de sus nombres ("AFIP" encuentra
+    "AFIP", "ARCA" y "ADMINISTRACION FEDERAL DE INGRESOS PUBLICOS"); lo demás,
+    por palabras enteras.
+    """
+    clave = _clave(texto)
+    if not clave:
+        return []
+    nombres = _NOMBRES.get(clave, (clave,))
+    return [_palabras_enteras(n) for n in nombres]
