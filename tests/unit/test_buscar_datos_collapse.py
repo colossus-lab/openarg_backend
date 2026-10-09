@@ -184,3 +184,66 @@ async def test_an_unknown_portal_is_named_in_the_note() -> None:
 
     nota = json.loads(out.content)["nota"]
     assert "'INDEC'" in nota and "indec" in nota
+
+
+async def test_lo_lejos_del_mejor_no_llega_al_modelo() -> None:
+    """Con Cohere v3 casi todo pasa 0,40: se quedan los datasets a 0,05 o menos
+    del mejor y los marts a 0,05 o menos del mejor mart (calibrado 09-oct)."""
+    from app.domain.ports.sandbox.sql_sandbox import MartInfo
+
+    hits = [
+        SearchResult("smvm", "Salario mínimo, vital y móvil", "", "datos_gob_ar", "u1", "", 0.75),
+        SearchResult("smvm2", "Salario mínimo en dólares", "", "datos_gob_ar", "u2", "", 0.71),
+        SearchResult("haber", "Haber mínimo jubilatorio", "", "datos_gob_ar", "u3", "", 0.54),
+    ]
+    sandbox = _Sandbox(
+        [
+            CachedTableInfo("raw.smvm__v1", "smvm", 400, ["indice_tiempo"]),
+            CachedTableInfo("raw.smvm2__v1", "smvm2", 400, ["indice_tiempo"]),
+            CachedTableInfo("raw.haber__v1", "haber", 300, ["indice_tiempo"]),
+        ],
+        {},
+    )
+
+    async def find_marts(emb: list[float], limit: int = 5) -> list[MartInfo]:
+        return [
+            MartInfo("mart.salarios", "salarios", "Salarios", "trabajo", 10, 0.62),
+            MartInfo("mart.empleo", "empleo", "Empleo", "trabajo", 10, 0.58),
+            MartInfo("mart.inflacion", "inflacion", "Inflación", "precios", 10, 0.55),
+        ]
+
+    sandbox.find_marts = find_marts  # type: ignore[method-assign]
+
+    out = await BuscarDatos().run(
+        {"texto": "salario mínimo"}, ToolContext(_deps(hits, sandbox), EngineRequest("q", "u"))
+    )
+
+    payload = json.loads(out.content)
+    assert [d["titulo"] for d in payload["datasets"]] == [
+        "Salario mínimo, vital y móvil",
+        "Salario mínimo en dólares",
+    ]
+    assert [m["tabla"] for m in payload["tablas_curadas"]] == ["mart.salarios", "mart.empleo"]
+    # El paso que ve la persona dice qué encontró, no sólo cuántos.
+    assert out.summary == (
+        "Encontró 2 datasets y 2 tablas curadas; el más parecido: «Salario mínimo, vital y móvil»"
+    )
+
+
+async def test_el_umbral_fijo_sigue_valiendo_debajo_del_mejor() -> None:
+    from app.domain.ports.sandbox.sql_sandbox import MartInfo
+
+    hits = [SearchResult("x", "Algo", "", "datos_gob_ar", "u", "", 0.42)]
+    sandbox = _Sandbox([CachedTableInfo("raw.x__v1", "x", 5, ["a"])], {})
+
+    async def find_marts(emb: list[float], limit: int = 5) -> list[MartInfo]:
+        return [MartInfo("mart.m", "m", "M", "d", 1, 0.39)]
+
+    sandbox.find_marts = find_marts  # type: ignore[method-assign]
+    out = await BuscarDatos().run(
+        {"texto": "algo"}, ToolContext(_deps(hits, sandbox), EngineRequest("q", "u"))
+    )
+
+    payload = json.loads(out.content)
+    assert [d["titulo"] for d in payload["datasets"]] == ["Algo"]
+    assert payload["tablas_curadas"] == []
