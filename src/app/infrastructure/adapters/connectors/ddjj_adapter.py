@@ -771,7 +771,8 @@ class DDJJAdapter:
             }
             for f in filas
         ]
-        buscado = ", ".join(x for x in (persona, entidad) if x)
+        buscado = ", ".join(x for x in (persona, entidad, organismo, cargo) if x)
+        total = int(conteo["n"])
         return DataResult(
             source="ddjj:actividades",
             portal_name="Declaraciones Juradas de actividades — Oficina Anticorrupción",
@@ -780,17 +781,20 @@ class DDJJAdapter:
             format="json",
             records=records,
             metadata={
-                "total_records": len(records),
-                "actividades_totales": int(conteo["n"]),
+                # El total va primero: la descripción se le corta al modelo a los
+                # 400 caracteres, y `filas_totales` sale de acá (no de las filas
+                # traídas, que tienen tope).
+                "total_records": total,
+                "actividades_totales": total,
                 "personas": int(conteo["personas"]),
                 "fetched_at": datetime.now(UTC).isoformat(),
                 "description": (
-                    "Actividades declaradas por autoridades nacionales al asumir (antes de asumir) y "
-                    "al irse (al irse), desde 2022: empleos, trabajos independientes, cargos públicos "
+                    f"{total} actividades de {int(conteo['personas'])} personas coinciden"
+                    + (f" (se muestran {len(records)})" if len(records) < total else "")
+                    + ". Son actividades declaradas por autoridades nacionales antes de asumir o "
+                    "al irse, desde 2022: empleos, trabajos independientes, cargos públicos "
                     "anteriores y actividades ad honorem. Es lo que la persona declaró; no dice nada "
-                    f"sobre conflictos de interés. {int(conteo['n'])} actividades de "
-                    f"{int(conteo['personas'])} personas coinciden"
-                    + (f"; se muestran {len(records)}." if len(records) < int(conteo["n"]) else ".")
+                    "sobre conflictos de interés."
                 ),
             },
         )
