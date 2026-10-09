@@ -95,6 +95,23 @@ _MIN_SIMILARITY = 0.40
 _MAX_DATASETS = 8
 _MAX_TABLES_PER_DATASET = 4
 _MAX_MARTS = 5
+# Con Cohere Embed Multilingual v3 casi todo el catálogo pasa 0,40 (hasta
+# "receta de empanadas" trae 8 datasets y 5 marts), así que el umbral fijo no
+# cortaba nada y siempre se llenaban los topes. Se queda lo que está cerca del
+# mejor resultado. Calibrado en prod el 09-oct-2026 con el gold de búsqueda
+# (52 consultas) y el de ruteo a marts (49): el dataset correcto queda a
+# 0,015 o menos del primero, el mart correcto a 0,05 o menos; con 0,05 no se
+# pierde ninguno y los marts por consulta bajan de 4,9 a 2,3.
+_DELTA_DATASETS = 0.05
+_DELTA_MARTS = 0.05
+_TITULO_RESUMEN_CHARS = 70
+
+
+def _cerca_del_mejor(puntajes: list[float], delta: float) -> float:
+    """El puntaje mínimo para quedar: el umbral fijo o el mejor menos `delta`."""
+    return max(_MIN_SIMILARITY, max(puntajes) - delta) if puntajes else _MIN_SIMILARITY
+
+
 _DESCRIPTION_CHARS = 300
 _MART_PORTAL = "OpenArg (tabla curada)"
 
@@ -326,14 +343,8 @@ class BuscarDatos:
         fingerprints = await content_fingerprints(deps.sandbox, hits, found_tables, profiles)
         # Una entrada por archivo, con la copia de más filas reales y
         # encabezado sano; prioridad chica a lo nacional si no nombra lugar.
-        datasets = [
-            {
-                "titulo": c.hit.title,
-                "portal": c.hit.portal,
-                "descripcion": (c.hit.description or "")[:_DESCRIPTION_CHARS],
-                **({"archivo": c.archivo} if c.archivo else {}),
-                "tablas": [_table_summary(t) for t in c.tables[:_MAX_TABLES_PER_DATASET]],
-            }
+        colapsados = [
+            c
             for c in collapse_hits(
                 hits,
                 found_tables,
@@ -342,7 +353,19 @@ class BuscarDatos:
                 fingerprints=fingerprints,
             )
             if c.tables
-        ][:_MAX_DATASETS]
+        ]
+        piso = _cerca_del_mejor([c.hit.score for c in colapsados], _DELTA_DATASETS)
+        elegidos = [c for c in colapsados if c.hit.score >= piso][:_MAX_DATASETS]
+        datasets = [
+            {
+                "titulo": c.hit.title,
+                "portal": c.hit.portal,
+                "descripcion": (c.hit.description or "")[:_DESCRIPTION_CHARS],
+                **({"archivo": c.archivo} if c.archivo else {}),
+                "tablas": [_table_summary(t) for t in c.tables[:_MAX_TABLES_PER_DATASET]],
+            }
+            for c in elegidos
+        ]
         logger.info(
             "buscar_datos: embed_ms=%.0f busqueda_ms=%.0f tablas_ms=%.0f hits=%d datasets=%d",
             (t_embed - t0) * 1000,
@@ -353,6 +376,7 @@ class BuscarDatos:
         )
 
         marts = await deps.sandbox.find_marts(vector, limit=_MAX_MARTS) if not portal else []
+        piso_marts = _cerca_del_mejor([m.score for m in marts], _DELTA_MARTS)
         curated = [
             {
                 "tabla": m.table_name,
@@ -361,7 +385,7 @@ class BuscarDatos:
                 "similitud": round(m.score, 2),
             }
             for m in marts
-            if m.score >= _MIN_SIMILARITY
+            if m.score >= piso_marts
         ]
         if not datasets and not curated:
             nota = "Nada parecido en el catálogo."
@@ -382,6 +406,14 @@ class BuscarDatos:
         found = count(len(datasets), "dataset", "datasets")
         if curated:
             found += f" y {count(len(curated), 'tabla curada', 'tablas curadas')}"
+        if elegidos:
+            # El conteo solo se repetía igual en cada pregunta: el título del
+            # mejor dice si la búsqueda encontró lo que se pedía. No es siempre
+            # el primero de la lista: el agrupado le da prioridad a lo nacional.
+            titulo = max(elegidos, key=lambda c: c.hit.score).hit.title or ""
+            if len(titulo) > _TITULO_RESUMEN_CHARS:
+                titulo = titulo[: _TITULO_RESUMEN_CHARS - 1].rstrip() + "…"
+            found += f"; el más parecido: «{titulo}»"
         return ToolOutcome(
             to_json({"tablas_curadas": curated, "datasets": datasets}),
             summary=f"Encontró {found}",
