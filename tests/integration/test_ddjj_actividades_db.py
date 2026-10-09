@@ -204,6 +204,14 @@ async def test_consultas_del_adaptador(engine):
         assert [r["nombre"] for r in despues.records] == ["PEREZ JUAN"]
         antes = await ddjj.actividades(entidad="techint", momento="anterior")
         assert antes.records == []
+        # Por el cargo público: quiénes dejaron Economía y adónde fueron.
+        dejaron = await ddjj.actividades(organismo="economía", momento="posterior")
+        assert [(r["nombre"], r["entidad"]) for r in dejaron.records] == [
+            ("PEREZ JUAN", "Techint S.A.")
+        ]
+        assert (await ddjj.actividades(organismo="ANSES")).records == []
+        con_cargo = await ddjj.actividades(organismo="economia", cargo="subsecretario")
+        assert con_cargo.metadata["personas"] == 3
         assert (await ddjj.actividades(entidad="YPF")).records[0]["tipo_actividad"] == (
             "empleo en relación de dependencia"
         )

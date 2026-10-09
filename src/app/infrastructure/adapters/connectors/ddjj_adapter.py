@@ -710,10 +710,13 @@ class DDJJAdapter:
         persona: str | None = None,
         entidad: str | None = None,
         momento: str | None = None,
+        organismo: str | None = None,
+        cargo: str | None = None,
         limite: int = 40,
     ) -> DataResult:
         """Dónde trabajaba una autoridad antes de asumir y adónde fue al irse (DDJJ de
-        actividades, sistema MAPPAP de la OA), por persona o por entidad."""
+        actividades, sistema MAPPAP de la OA), por persona, por entidad o por el
+        organismo y el cargo público que declaró (el que asumía o el que dejaba)."""
         params: dict[str, Any] = {"lim": limite}
         condiciones = []
         if persona:
@@ -733,9 +736,10 @@ class DDJJAdapter:
         if momento in ("anterior", "posterior"):
             params["momento"] = momento
             condiciones.append("momento = :momento")
-        if not condiciones:
-            condiciones.append("false")
-        donde = " AND ".join(condiciones)
+        donde = " AND ".join(condiciones) or "true"
+        donde += self._filtros(params, poder=None, organismo=organismo, cargo=cargo)
+        if donde == "true":
+            donde = "false"
         filas = await self._filas(
             f"SELECT * FROM {TABLA_ACTIVIDADES} WHERE {donde} "
             "ORDER BY nombre, momento, desde DESC NULLS LAST LIMIT :lim",
