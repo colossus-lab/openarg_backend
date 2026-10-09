@@ -205,6 +205,7 @@ def create_celery() -> Celery:
         "openarg.check_series_freshness": {"queue": "ingest"},
         "openarg.ingest_ddjj_oa": {"queue": "ingest"},
         "openarg.ingest_ddjj_caba": {"queue": "ingest"},
+        "openarg.ingest_ddjj_actividades": {"queue": "ingest"},
         "openarg.retirar_ddjj_genericas": {"queue": "ingest"},
         "openarg.run_pipeline": {"queue": "scraper"},
         "openarg.scrape_mapa_estado": {"queue": "scraper"},
@@ -905,6 +906,13 @@ def create_celery() -> Celery:
                 # última carga escrita, no baja nada.
                 "task": "openarg.ingest_ddjj_oa",
                 "schedule": crontab(day_of_week=1, hour=4, minute=30),
+                "options": {"queue": "ingest"},
+            },
+            "ingest-ddjj-actividades": {
+                # Semanal, lunes 5:00 ART. La OA publica un corte por trimestre; si
+                # ningún CSV cambió (hash), no escribe nada.
+                "task": "openarg.ingest_ddjj_actividades",
+                "schedule": crontab(day_of_week=1, hour=5, minute=0),
                 "options": {"queue": "ingest"},
             },
             "ingest-ddjj-caba": {

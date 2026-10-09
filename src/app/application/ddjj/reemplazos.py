@@ -1,8 +1,9 @@
 """Los datasets de DDJJ que el colector genérico ya no baja.
 
 Las declaraciones de la Oficina Anticorrupción (en su portal, `justicia`, y en
-su copia de `datos_gob_ar`) y las de la Ciudad de Buenos Aires las carga
-`ddjj_tasks` en `raw.cache_ddjj_*`. Por el colector genérico llegaban rotas:
+su copia de `datos_gob_ar`), las de actividades anteriores y posteriores a la
+función pública y las de la Ciudad de Buenos Aires las carga `ddjj_tasks` en
+`raw.cache_ddjj_*`. Por el colector genérico llegaban rotas:
 
 - ~60 tablas para un mismo dataset;
 - años cortados en 500.000 filas;
@@ -22,6 +23,14 @@ REEMPLAZADOS: frozenset[tuple[str, str]] = frozenset(
         ("justicia", "Declaraciones Juradas Patrimoniales Integrales de carácter público"),
         ("datos_gob_ar", "Declaraciones Juradas Patrimoniales Integrales de carácter público"),
         ("caba", "Declaraciones Juradas"),
+        (
+            "justicia",
+            "Declaraciones Juradas de actividades anteriores y posteriores a la función pública",
+        ),
+        (
+            "datos_gob_ar",
+            "Declaraciones Juradas de actividades anteriores y posteriores a la función pública",
+        ),
     }
 )
 

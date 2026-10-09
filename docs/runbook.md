@@ -311,6 +311,10 @@ Cada corrida queda anotada en `public.ddjj_cargas`, con el plan (qué archivo de
 la Oficina Anticorrupción se usó para cada año y qué cortes se descartaron) y
 las filas por año.
 
+La carga de actividades anteriores y posteriores (`ingest_ddjj_actividades`,
+entrada `ingest-ddjj-actividades`) reemplaza sólo `cache_ddjj_actividades`, con
+su propia previa: volver atrás es el mismo intercambio, para esa tabla sola.
+
 La carga de CABA (`ingest_ddjj_caba`, entrada `ingest-ddjj-caba`) reemplaza
 sólo `cache_ddjj_declaraciones`: copia tal cual las filas de la OA y deja su
 propia previa. Así que la `__previa` de declaraciones es la de la última carga,
@@ -318,7 +322,7 @@ de cualquiera de las dos fuentes, y las de bienes y deudas son siempre de la
 última carga de la OA. Antes de volver atrás, mirar en `ddjj_cargas` cuál
 corrió última.
 
-1. Frenar las cargas: `OPENARG_BEAT_DESACTIVADAS=ingest-ddjj-oa,ingest-ddjj-caba`
+1. Frenar las cargas: `OPENARG_BEAT_DESACTIVADAS=ingest-ddjj-oa,ingest-ddjj-caba,ingest-ddjj-actividades`
    en el `.env` y recrear `beat`. Si no, el lunes siguiente vuelven a escribir.
    Si la última carga fue de CABA, alcanza con intercambiar sólo
    `cache_ddjj_declaraciones`.

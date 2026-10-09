@@ -61,6 +61,7 @@ from celery.exceptions import SoftTimeLimitExceeded
 from sqlalchemy import text
 from sqlalchemy.engine import Connection, Engine
 
+from app.application.ddjj import actividades as act
 from app.application.ddjj import caba
 from app.application.ddjj import oficina_anticorrupcion as oa
 from app.infrastructure.celery.app import celery_app
@@ -80,6 +81,7 @@ PAQUETE_OA = "declaraciones-juradas-patrimoniales-integrales"
 TABLA_DECLARACIONES = "cache_ddjj_declaraciones"
 TABLA_BIENES = "cache_ddjj_bienes"
 TABLA_DEUDAS = "cache_ddjj_deudas"
+TABLA_ACTIVIDADES = "cache_ddjj_actividades"
 
 _TIMEOUT_S = 120.0
 # Un User-Agent que dice quién pide: el CDN de la Ciudad y datos.jus.gob.ar lo aceptan.
@@ -91,6 +93,28 @@ _LOCK_DDJJ = 7_310_251_208
 _CAIDA_MAXIMA = 0.10
 
 _DDL: dict[str, str] = {
+    TABLA_ACTIVIDADES: """
+        momento text NOT NULL,
+        documento text NOT NULL,
+        fecha_documento date,
+        tramite text,
+        cuit text NOT NULL,
+        nombre text,
+        cargo text,
+        organismo text,
+        cargo_desde date,
+        cargo_hasta date,
+        profesion text,
+        tipo text NOT NULL,
+        entidad text NOT NULL,
+        entidad_cuit text,
+        sector text,
+        puesto text,
+        desde date,
+        hasta date,
+        continua boolean,
+        url_fuente text
+    """,
     TABLA_DECLARACIONES: """
         fuente text NOT NULL,
         dj_id bigint NOT NULL,
@@ -153,6 +177,7 @@ _DDL: dict[str, str] = {
 
 # (sufijo del nombre, definición). El primero de declaraciones es la clave.
 _INDICES: dict[str, tuple[tuple[str, str], ...]] = {
+    TABLA_ACTIVIDADES: (("cuit_idx", "(cuit)"),),
     TABLA_DECLARACIONES: (
         ("pkey", "PRIMARY KEY (fuente, dj_id)"),
         ("cuit_idx", "(cuit)"),
@@ -652,6 +677,7 @@ class FichaTabla:
     tags: str
     bytes: int
     organizacion: str = "Oficina Anticorrupción"
+    url: str = oa.URL_DATASET
 
     @property
     def identidad(self) -> str:
@@ -841,7 +867,7 @@ def _asegurar_dataset(engine: Engine, ficha: FichaTabla) -> tuple[str, bool]:
                 "desc": ficha.descripcion,
                 "org": ficha.organizacion,
                 "portal": PORTAL,
-                "url": oa.URL_DATASET,
+                "url": ficha.url,
                 "cols": json.dumps(list(ficha.columnas)),
                 "tags": ficha.tags,
                 "now": datetime.now(UTC),
@@ -867,7 +893,7 @@ def veredicto_ws0(engine: Engine, *, dataset_id: str, ficha: FichaTabla) -> str 
         dataset_id=dataset_id,
         portal=PORTAL,
         source_id=ficha.source_id,
-        download_url=oa.URL_DATASET,
+        download_url=ficha.url,
         declared_format="csv",
         table_name=ficha.tabla,
         materialized_columns=columnas,
@@ -914,7 +940,7 @@ def completar_metadatos(
                     "title": ficha.titulo,
                     "desc": ficha.descripcion,
                     "org": ficha.organizacion,
-                    "url": oa.URL_DATASET,
+                    "url": ficha.url,
                     "cols": json.dumps(list(ficha.columnas)),
                     "tags": ficha.tags,
                     "rows": ficha.filas,
@@ -930,7 +956,7 @@ def completar_metadatos(
             row_count=ficha.filas,
             columns=list(ficha.columnas),
             declared_format="csv",
-            download_url=oa.URL_DATASET,
+            download_url=ficha.url,
             declared_size_bytes=ficha.bytes,
         )
         if not final.get("ok"):
@@ -1466,6 +1492,199 @@ def ingest_ddjj_caba(
     return _ejecutar(self, engine, caba.FUENTE, "DDJJ CABA", cuerpo)
 
 
+# ── actividades anteriores y posteriores ─────────────────────────────────────
+
+# Las actualizaciones repiten actividades ya declaradas: una actividad es la
+# misma si coinciden persona, momento, tipo, entidad y fecha de inicio, y se
+# queda la del documento más nuevo (7.195 filas → ~4.760 el 08-oct).
+_CLAVE_ACTIVIDAD = (0, 4, 11, 12, 16)  # momento, cuit, tipo, entidad, desde
+
+
+def deduplicar_actividades(filas: Iterable[tuple]) -> list[tuple]:
+    ordenadas = sorted(filas, key=lambda f: (f[2] or date.min, f[1]), reverse=True)
+    vistas: set[tuple] = set()
+    unicas: list[tuple] = []
+    for fila in ordenadas:
+        clave = tuple(
+            (fila[i] or "").upper() if isinstance(fila[i], str) else fila[i]
+            for i in _CLAVE_ACTIVIDAD
+        )
+        if clave in vistas:
+            continue
+        vistas.add(clave)
+        unicas.append(fila)
+    return unicas
+
+
+def _por_momento(conn: Connection, tabla: str) -> dict[str, int]:
+    if not _existe(conn, tabla):
+        return {}
+    return {
+        str(m): int(n)
+        for m, n in conn.execute(text(f'SELECT momento, count(*) FROM raw."{tabla}" GROUP BY 1'))
+    }
+
+
+def ficha_actividades(conn: Connection) -> FichaTabla:
+    tabla = f"{TABLA_ACTIVIDADES}__nueva"
+    personas = conn.execute(
+        text(
+            f'SELECT momento, count(DISTINCT cuit), min(fecha_documento), max(fecha_documento) FROM raw."{tabla}" GROUP BY 1'
+        )
+    ).all()
+    detalle = "; ".join(
+        f"{'antes de asumir' if m == act.ANTERIOR else 'al irse'}: {_miles(int(n))} personas "
+        f"({desde.isoformat() if desde else '?'} a {hasta.isoformat() if hasta else '?'})"
+        for m, n, desde, hasta in sorted(personas)
+    )
+    return FichaTabla(
+        tabla=TABLA_ACTIVIDADES,
+        source_id="ddjj-actividades",
+        titulo="Actividades anteriores y posteriores a la función pública declaradas por funcionarios",
+        descripcion=(
+            "Dónde trabajaban las autoridades nacionales (ministros, secretarios, subsecretarios, "
+            "directores, presidentes de organismos) antes de asumir y adónde fueron al irse, según "
+            "sus declaraciones juradas de actividades (sistema MAPPAP de la Oficina "
+            "Anticorrupción). Una fila por actividad: empleo en relación de dependencia, trabajo "
+            "independiente, cargo público anterior o actividad ad honorem, con la entidad, su CUIT, "
+            f"el sector, el puesto y las fechas. {detalle}. Fuente: Oficina Anticorrupción, "
+            f"datos.jus.gob.ar, dataset {act.PAQUETE} (CC-BY 4.0)."
+        ),
+        columnas=_columnas_de(conn, tabla),
+        filas=_cantidad(conn, tabla) or 0,
+        tags=(
+            "declaraciones juradas,ddjj,actividades anteriores,actividades posteriores,funcionarios,"
+            "empleos previos,sector privado,oficina anticorrupcion,mappap,transparencia"
+        ),
+        bytes=_bytes(conn, tabla),
+        url=act.URL_DATASET,
+    )
+
+
+def cargar_actividades(
+    engine: Engine,
+    archivos: list[act.Archivo],
+    *,
+    permitir_menos_filas: bool,
+) -> dict[str, Any]:
+    """Reemplaza `cache_ddjj_actividades`. Lanza `_Rechazo` sin tocar nada."""
+    crudas = [f for a in archivos for f in act.filas_actividades(a)]
+    filas = deduplicar_actividades(crudas)
+    with engine.begin() as conn:
+        conn.execute(text("SELECT pg_advisory_xact_lock(:k)"), {"k": _LOCK_DDJJ})
+        conn.execute(text("SET LOCAL statement_timeout = '15min'"))
+        _crear_nueva(conn, TABLA_ACTIVIDADES)
+        n = _copiar(conn, f'raw."{TABLA_ACTIVIDADES}__nueva"', act.COLUMNAS, filas)
+        _indexar(conn, TABLA_ACTIVIDADES)
+        nuevas = _por_momento(conn, f"{TABLA_ACTIVIDADES}__nueva")
+        vivas = _por_momento(conn, TABLA_ACTIVIDADES)
+        if not nuevas:
+            raise _Rechazo("no quedó ninguna actividad")
+        if not permitir_menos_filas:
+            faltan = sorted(set(vivas) - set(nuevas))
+            if faltan:
+                raise _Rechazo(f"desaparecen las actividades {', '.join(faltan)}")
+            caidas = [
+                f"{m}: {nuevas[m]} contra {vivas[m]}"
+                for m in sorted(vivas)
+                if nuevas[m] < (1 - _CAIDA_MAXIMA) * vivas[m]
+            ]
+            if caidas:
+                raise _Rechazo(
+                    f"caen más de {_CAIDA_MAXIMA:.0%} las actividades {'; '.join(caidas)}"
+                )
+        publicadas = _publicar(engine, conn, [ficha_actividades(conn)])
+    _completar(engine, publicadas)
+    return {
+        "actividades": n,
+        "por_momento": dict(sorted(nuevas.items())),
+        "filas_leidas": len(crudas),
+        "repetidas": len(crudas) - len(filas),
+    }
+
+
+def _ultimos_csv(recursos: Iterable[Recurso]) -> dict[str, Recurso]:
+    """El CSV suelto más nuevo de cada momento (los ZIP anuales repiten los cortes)."""
+    elegidos: dict[str, Recurso] = {}
+    for rec in recursos:
+        if rec.formato != "csv":
+            continue
+        momento = act.momento_de(rec.url.rsplit("/", 1)[-1])
+        if momento is None:
+            continue
+        if momento not in elegidos or rec.url > elegidos[momento].url:
+            elegidos[momento] = rec
+    return elegidos
+
+
+@celery_app.task(
+    name="openarg.ingest_ddjj_actividades",
+    bind=True,
+    max_retries=2,
+    soft_time_limit=900,
+    time_limit=1000,
+)
+def ingest_ddjj_actividades(
+    self,
+    *,
+    forzar: bool = False,
+    permitir_menos_filas: bool = False,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    """Carga las DDJJ de actividades anteriores y posteriores si algún CSV cambió.
+
+    Son dos CSV chicos (~7 MB): siempre se bajan y se compara su hash con el de
+    la última carga escrita. Mismos parámetros que `ingest_ddjj_oa`.
+    """
+    engine = get_sync_engine()
+    fuente = "oa_actividades"
+
+    def cuerpo() -> tuple[str, list[dict[str, str]] | None, dict[str, Any]]:
+        with httpx.Client(timeout=_TIMEOUT_S, follow_redirects=True, headers=_HEADERS) as client:
+            elegidos = _ultimos_csv(consultar_paquete(client, act.PAQUETE))
+            if set(elegidos) != {act.ANTERIOR, act.POSTERIOR}:
+                raise _Falla(
+                    "paquete",
+                    f"faltan los CSV de {sorted({act.ANTERIOR, act.POSTERIOR} - set(elegidos))}",
+                )
+            archivos: list[act.Archivo] = []
+            mani: list[dict[str, str]] = []
+            for momento, rec in sorted(elegidos.items()):
+                r = client.get(rec.url)
+                r.raise_for_status()
+                contenido = r.content
+                archivos.append(
+                    act.Archivo(
+                        momento=momento, texto=contenido.decode("utf-8-sig", "replace"), url=rec.url
+                    )
+                )
+                mani.append({"url": rec.url, "sha256": hashlib.sha256(contenido).hexdigest()})
+        if (
+            not forzar
+            and not dry_run
+            and mani == ultima_carga(engine, fuente)
+            and tablas_en_orden(engine, (TABLA_ACTIVIDADES,))
+        ):
+            _latir(engine, ("ddjj-actividades",))
+            logger.info("DDJJ actividades: sin cambios en la fuente")
+            return "al_dia", mani, {}
+        if dry_run:
+            crudas = [f for a in archivos for f in act.filas_actividades(a)]
+            return (
+                "simulada",
+                mani,
+                {
+                    "archivos": [a.url.rsplit("/", 1)[-1] for a in archivos],
+                    "filas_leidas": len(crudas),
+                    "actividades": len(deduplicar_actividades(crudas)),
+                },
+            )
+        resumen = cargar_actividades(engine, archivos, permitir_menos_filas=permitir_menos_filas)
+        return "escrita", mani, resumen
+
+    return _ejecutar(self, engine, fuente, "DDJJ actividades", cuerpo)
+
+
 # ── retiro de las tablas del colector genérico ───────────────────────────────
 
 # Sin esquema: `cache_drop_audit` está en `raw` o en `public` según la base, y el
@@ -1526,6 +1745,13 @@ def tablas_viejas(engine: Engine) -> tuple[list[TablaVieja], list[str]]:
                   ON b.table_schema = a.table_schema AND b.table_name = a.table_name
                  AND b.column_name = 'funcionario_apellido_nombre'
                 WHERE a.column_name = 'dj_id' AND a.table_schema IN ('raw', 'public')
+                UNION
+                -- las de actividades anteriores y posteriores (MAPPAP)
+                SELECT a.table_name FROM information_schema.columns a
+                JOIN information_schema.columns b
+                  ON b.table_schema = a.table_schema AND b.table_name = a.table_name
+                 AND b.column_name = 'cargo_jurisdiccion'
+                WHERE a.column_name = 'cuit_cuil' AND a.table_schema IN ('raw', 'public')
                 """
             )
         ).all()
@@ -1562,7 +1788,7 @@ def retirar(engine: Engine, *, dry_run: bool) -> dict[str, Any]:
     # El mismo piso que las demás limpiezas: sin registro no se borra nada.
     require_registry(engine, task="retirar_ddjj_genericas")
     with engine.connect() as conn:
-        for tabla in (TABLA_DECLARACIONES, TABLA_BIENES, TABLA_DEUDAS):
+        for tabla in (TABLA_DECLARACIONES, TABLA_BIENES, TABLA_DEUDAS, TABLA_ACTIVIDADES):
             if not _existe(conn, tabla):
                 raise _Falla("retiro", f"falta raw.{tabla}: primero cargar las DDJJ propias")
     tablas, dataset_ids = tablas_viejas(engine)
