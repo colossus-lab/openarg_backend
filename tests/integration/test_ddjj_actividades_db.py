@@ -212,6 +212,12 @@ async def test_consultas_del_adaptador(engine):
         assert (await ddjj.actividades(organismo="ANSES")).records == []
         con_cargo = await ddjj.actividades(organismo="economia", cargo="subsecretario")
         assert con_cargo.metadata["personas"] == 3
+        # Con tope de filas, el total sigue siendo el real y va al principio.
+        topadas = await ddjj.actividades(organismo="economia", limite=2)
+        assert len(topadas.records) == 2 and topadas.metadata["total_records"] == 4
+        assert topadas.metadata["description"].startswith(
+            "4 actividades de 3 personas coinciden (se muestran 2)."
+        )
         assert (await ddjj.actividades(entidad="YPF")).records[0]["tipo_actividad"] == (
             "empleo en relación de dependencia"
         )
