@@ -261,8 +261,27 @@ async def test_herramienta_actividades_pasa_los_filtros():
         {"accion": "actividades", "entidad": "Techint", "momento": "anterior"}, _ctx(Falso())
     )
     assert json.loads(out.content)["filas"][0]["entidad"] == "Techint S.A."
-    assert pedidos == [{"persona": None, "entidad": "Techint", "momento": "anterior"}]
-    with pytest.raises(ToolInputError, match="hace falta `nombre` o `entidad`"):
+    await DeclaracionesJuradas().run(
+        {"accion": "actividades", "organismo": "Ministerio de Economía", "momento": "posterior"},
+        _ctx(Falso()),
+    )
+    assert pedidos == [
+        {
+            "persona": None,
+            "entidad": "Techint",
+            "momento": "anterior",
+            "organismo": None,
+            "cargo": None,
+        },
+        {
+            "persona": None,
+            "entidad": None,
+            "momento": "posterior",
+            "organismo": "Ministerio de Economía",
+            "cargo": None,
+        },
+    ]
+    with pytest.raises(ToolInputError, match="hace falta `nombre`, `entidad` u `organismo`"):
         await DeclaracionesJuradas().run({"accion": "actividades"}, _ctx(Falso()))
     with pytest.raises(ToolInputError, match="anterior o posterior"):
         await DeclaracionesJuradas().run(
@@ -275,3 +294,5 @@ def test_la_descripcion_no_deja_calificar_los_pases():
     assert "no lo llames conflicto de interés ni puerta giratoria" in description
     assert "no sugieras que hubo una irregularidad" in description
     assert "`actividades`" in description
+    # «Los que dejaron Economía» es el organismo del cargo, no el empleador.
+    assert "usá `organismo` con `momento` posterior" in description

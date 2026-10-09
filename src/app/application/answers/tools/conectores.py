@@ -1114,11 +1114,15 @@ class DeclaracionesJuradas:
             "que en el registro publicado esa cifra de su DDJJ no cierra con el resto de la "
             "declaración, sin atribuírselo a la persona. Si `buscar` no encuentra a alguien, "
             "decí qué cubren las fuentes (`cobertura`) en vez de suponer que no declaró. "
-            "`actividades` (con `nombre` o `entidad`, y `momento` anterior o posterior) dice dónde "
-            "trabajaba una autoridad nacional antes de asumir y adónde fue al irse (declaraciones "
-            "de actividades de la Oficina Anticorrupción, desde 2022): empleos, trabajos "
-            "independientes, cargos públicos anteriores y actividades ad honorem, con fechas. Con "
-            "`entidad` dice quiénes trabajaron en una empresa u organismo antes o después. Contá lo "
+            "`actividades` (con `nombre`, `entidad` u `organismo`, y `momento` anterior o "
+            "posterior) dice dónde trabajaba una autoridad nacional antes de asumir y adónde fue "
+            "al irse (declaraciones de actividades de la Oficina Anticorrupción, desde 2022): "
+            "empleos, trabajos independientes, cargos públicos anteriores y actividades ad "
+            "honorem, con fechas. `entidad` es el empleador declarado: quiénes trabajaron en una "
+            "empresa u organismo antes o después. `organismo` y `cargo` son el cargo público de "
+            "la declaración (el que asumía, o el que dejaba si `momento` es posterior): para "
+            "«adónde fueron los que dejaron Economía» usá `organismo` con `momento` posterior, "
+            "no `entidad`. Contá lo "
             "declarado tal cual: no califiques un pase entre el sector privado y el público, no lo "
             "llames conflicto de interés ni puerta giratoria y no sugieras que hubo una "
             "irregularidad."
@@ -1179,12 +1183,20 @@ class DeclaracionesJuradas:
         elif accion == "actividades":
             nombre = str_arg(args, "nombre", max_len=120)
             entidad = str_arg(args, "entidad", max_len=120)
-            if not nombre and not entidad:
-                raise ToolInputError("Para `actividades` hace falta `nombre` o `entidad`.")
+            if not nombre and not entidad and not filtros["organismo"]:
+                raise ToolInputError(
+                    "Para `actividades` hace falta `nombre`, `entidad` u `organismo`."
+                )
             momento = str_arg(args, "momento", max_len=10)
             if momento not in (None, "anterior", "posterior"):
                 raise ToolInputError("`momento` es anterior o posterior.")
-            result = await ddjj.actividades(persona=nombre, entidad=entidad, momento=momento)
+            result = await ddjj.actividades(
+                persona=nombre,
+                entidad=entidad,
+                momento=momento,
+                organismo=filtros["organismo"],
+                cargo=filtros["cargo"],
+            )
         elif accion == "estadisticas":
             result = await ddjj.stats(anio=anio, jurisdiccion=jurisdiccion or "nacional", **filtros)
         else:
