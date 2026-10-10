@@ -59,6 +59,7 @@ async def execute_ddjj_step(
             anio=anio,
             cargo=params.get("cargo"),
             organismo=params.get("organismo"),
+            altos_cargos=params.get("altos_cargos") is True,
         )
         position = params.get("position")
         if position and result.records and len(result.records) >= position:
@@ -74,7 +75,9 @@ async def execute_ddjj_step(
         return [result] if result.records else []
 
     if action == "stats":
-        result = await ddjj.stats(anio=anio, cargo=params.get("cargo"))
+        result = await ddjj.stats(
+            anio=anio, cargo=params.get("cargo"), altos_cargos=params.get("altos_cargos") is True
+        )
         return [result] if result.records else []
 
     # Name-based searches: return explicit "not found" result so the analyst
