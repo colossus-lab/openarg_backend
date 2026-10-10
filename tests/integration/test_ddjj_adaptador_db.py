@@ -379,3 +379,72 @@ async def test_organismo_por_sigla_y_por_palabra_entera(ddjj):
     assert catamarca.records[0]["total"] == 1
     nada = await ddjj.ranking("patrimonio", 10, anio=2019, organismo="ANSES")
     assert nada.records == []
+
+
+async def test_altos_cargos_e_inverosimiles(ddjj):
+    """«Top 10 ddjj gobierno» (10-oct-2026): con `altos_cargos` quedan las
+    autoridades, y una cifra inverosímil queda afuera como una inconsistente."""
+    extra = [
+        {
+            **_decl(
+                10,
+                "FLORES ALDO JAVIER",
+                cuit="20000000010",
+                cargo="Jefe Diseño Grafico",
+                organismo="FUERZA AEREA ARGENTINA",
+                poder="ejecutivo",
+                patrimonio=250_007 * M,
+            ),
+            "inverosimil": ["inmueble"],
+        },
+        {
+            **_decl(
+                11,
+                "CAPUTO LUIS ANDRES",
+                cuit="20000000011",
+                cargo="Ministro de Economia",
+                organismo="",
+                poder="ejecutivo",
+                patrimonio=11_700 * M,
+                ingresos=338 * M,
+            ),
+            "alto_cargo": True,
+        },
+    ]
+    engine = _db.get_sync_engine()
+    with engine.begin() as conn:
+        for fila in extra:
+            cols = ", ".join(fila)
+            conn.execute(
+                text(
+                    f'INSERT INTO raw."{dt.TABLA_DECLARACIONES}" ({cols}) '
+                    f"VALUES ({', '.join(':' + c for c in fila)})"
+                ),
+                fila,
+            )
+        conn.execute(
+            text(f'UPDATE raw."{dt.TABLA_DECLARACIONES}" SET alto_cargo = true WHERE dj_id = 6')
+        )
+
+    gobierno = await ddjj.ranking("patrimonio", 10, poder="ejecutivo", altos_cargos=True)
+    assert _nombres(gobierno) == ["CAPUTO LUIS ANDRES"]
+    assert "altos cargos" in gobierno.metadata["description"]
+    assert "excluidas_por_inconsistencia" not in gobierno.metadata
+
+    ejecutivo = await ddjj.ranking("patrimonio", 10, poder="ejecutivo")
+    assert _nombres(ejecutivo) == ["CAPUTO LUIS ANDRES", "RUIZ MARTA", "PEREZ JUANA"]
+    assert ejecutivo.metadata["excluidas_por_inconsistencia_nombres"] == ["FLORES ALDO JAVIER"]
+    assert "inverosímiles" in ejecutivo.metadata["description"]
+
+    autoridades = await ddjj.ranking("patrimonio", 10, altos_cargos=True)
+    assert _nombres(autoridades) == ["CAPUTO LUIS ANDRES", "GOMEZ ANA"]
+
+    [fila] = (await ddjj.stats(poder="ejecutivo")).records
+    assert fila["total"] == 4 and fila["excluidas_por_inconsistencia"] == 1
+    assert fila["patrimonio_maximo_nombre"] == "CAPUTO LUIS ANDRES"
+    [solo_altos] = (await ddjj.stats(poder="ejecutivo", altos_cargos=True)).records
+    assert solo_altos["total"] == 1 and "altos cargos" in solo_altos["alcance"]
+
+    [flores] = (await ddjj.search("flores aldo")).records
+    assert flores["inconsistente"] is True
+    assert "un inmueble en el país figura valuado" in flores["motivo_inconsistencia"]

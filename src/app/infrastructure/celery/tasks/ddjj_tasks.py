@@ -28,6 +28,10 @@ cada declaración que tiene detalle:
 - **Inconsistencias (H005).** `inconsistente` es el total que no cierra con su
   propio detalle; `ingresos_inconsistentes`, el ahorro imposible. Los dos
   vienen del conector viejo, donde la regla está explicada.
+- **Inverosímiles.** `inverosimil` son los errores de tipeo que están dentro
+  del detalle (una casa de $250.000 M): ver `_SQL_ARMAR`.
+- **Altos cargos.** `alto_cargo` es lo que cuenta como «el gobierno»: ver
+  `application/ddjj/jerarquia.py`.
 
 El reemplazo es como el de las series (`series_tiempo_tasks.escribir_atomico`):
 
@@ -153,7 +157,9 @@ _DDL: dict[str, str] = {
         inconsistente boolean NOT NULL DEFAULT false,
         ingresos_inconsistentes boolean NOT NULL DEFAULT false,
         bienes_por_tipo jsonb,
-        fecha_presentacion date
+        fecha_presentacion date,
+        alto_cargo boolean NOT NULL DEFAULT false,
+        inverosimil text[]
     """,
     TABLA_BIENES: """
         dj_id bigint NOT NULL,
@@ -460,6 +466,32 @@ def _conservar_otras_fuentes(conn: Connection, fuente: str) -> int:
 # - **H005**, las mismas reglas que el conector viejo
 #   (`ddjj_adapter._inconsistency` e `_income_inconsistency`), sobre lo
 #   declarado y el detalle del mismo período.
+# - **Inverosímiles** (`inverosimil`, las reglas que dispararon). H005 compara
+#   el total con su detalle, pero hay errores de tipeo que están DENTRO del
+#   detalle, y entonces cierran. «Top 10 ddjj gobierno» (10-oct-2026) puso
+#   primeros a un jefe de diseño gráfico con una casa en Capital de
+#   $250.000.000.000, a un subcomisario con un departamento de $100.000.000.000
+#   y a una encargada de registro automotor con un fondo común de
+#   $33.670.175.822; ella misma anotó en el origen de los fondos "OJO! Sistema
+#   toma mal el dato de B.Personales. Valor correcto: 33.670.175-82". Contra la
+#   mediana del patrimonio del año (para que el umbral no dependa de la
+#   inflación; en 2024, 150 veces la mediana son ~$4.500 M):
+#   - `inmueble`: un inmueble en el país vale más que el umbral. Sin los
+#     rurales, donde el valor de la tierra puede ser real. Al principio era sólo
+#     la casa-habitación, y dejaba pasar a una directora nacional con un
+#     departamento en CABA "Destino: OTROS" de $12.000.000.000 (en su baja, el
+#     mismo departamento vale $150.000) y a un ordenanza con una casa en
+#     alquiler de $200.000 M.
+#   - `salto`: anual o baja, patrimonio sobre el umbral y bienes al cierre más
+#     de 100 veces los del inicio.
+#   - `ingresos`: anual o baja, patrimonio sobre el umbral y más de 1.000 veces
+#     el mayor de sus ingresos declarados (no sólo `ingresos_netos`: Daza
+#     declara 0 ahí y $2.711 M en `ingresos_no_alcanzados`).
+#   En 2024 marcan a los 7 de ese ranking y dejan a Werthein, Mondino, Daza,
+#   Caputo y Cuneo Libarona, cuyo patrimonio es de 2 a 34 veces sus ingresos.
+_VECES_MEDIANA_INVEROSIMIL = 150
+_VECES_SALTO_INVEROSIMIL = 100
+_VECES_INGRESOS_INVEROSIMIL = 1_000
 _SQL_ARMAR = """
     INSERT INTO raw."{decl}__nueva" ({columnas})
     WITH sb AS (
@@ -497,8 +529,30 @@ _SQL_ARMAR = """
     ), m AS (
         SELECT k.*,
                CASE WHEN tipo = 'Inicial' THEN bi ELSE bc END AS bienes_decl,
-               GREATEST(coalesce(bi, 0), coalesce(bc, 0), coalesce(di, 0)) AS base
+               GREATEST(coalesce(bi, 0), coalesce(bc, 0), coalesce(di, 0)) AS base,
+               CASE WHEN tipo = 'Inicial' THEN coalesce(bi, 0) - coalesce(di, 0)
+                    ELSE coalesce(bc, 0) - coalesce(dc, 0) END AS pat,
+               GREATEST(coalesce(ingresos_netos, 0), coalesce(ingresos_trabajo_alquileres_rentas, 0),
+                        coalesce(ingresos_no_alcanzados, 0)) AS ing
         FROM k
+    ), med AS (
+        SELECT anio AS med_anio,
+               {veces_mediana} * percentile_cont(0.5) WITHIN GROUP (ORDER BY pat) AS umbral
+        FROM m WHERE pat > 0 GROUP BY anio
+    ), inm AS (
+        SELECT dj_id AS inm_dj,
+               max(importe) FILTER (WHERE periodo = 'inicio') AS inm_i,
+               max(importe) FILTER (WHERE periodo = 'cierre') AS inm_c
+        FROM raw."{bienes}__nueva"
+        WHERE upper(tipo) LIKE 'INMUEBLES EN EL PA%'
+          AND upper(coalesce(descripcion, '')) NOT LIKE '%RURAL%'
+        GROUP BY dj_id
+    ), mm AS (
+        SELECT m.*, med.umbral,
+               CASE WHEN tipo = 'Inicial' THEN inm.inm_i ELSE inm.inm_c END AS inmueble
+        FROM m
+        LEFT JOIN med ON med.med_anio = m.anio
+        LEFT JOIN inm ON inm.inm_dj = m.dj_id
     )
     SELECT {originales},
            bi, di, bc, dc,
@@ -521,8 +575,15 @@ _SQL_ARMAR = """
                OR coalesce(bienes_decl, 0) * 10 < det), false),
            coalesce(base > 0
                     AND coalesce(ingresos_netos, 0) - coalesce(gastos_personales, 0) > 10 * base,
-                    false)
-    FROM m
+                    false),
+           NULLIF(array_remove(ARRAY[
+               CASE WHEN inmueble > umbral THEN 'inmueble' END,
+               CASE WHEN coalesce(tipo, '') <> 'Inicial' AND pat > umbral AND bi > 0
+                         AND bc > {veces_salto} * bi THEN 'salto' END,
+               CASE WHEN coalesce(tipo, '') <> 'Inicial' AND pat > umbral AND ing > 0
+                         AND pat > {veces_ingresos} * ing THEN 'ingresos' END
+           ]::text[], NULL), '{{}}'::text[])
+    FROM mm
 """
 
 # Las columnas de la carga que pasan tal cual; los cuatro totales salen
@@ -540,6 +601,7 @@ _CALCULADAS = (
     "corregido_x10",
     "inconsistente",
     "ingresos_inconsistentes",
+    "inverosimil",
 )
 _CARGA = "ddjj_carga"
 # Tipos de la tabla temporal; lo que no está acá es un monto (`numeric`).
@@ -560,6 +622,7 @@ _TIPO_CARGA = {
     "corte": "date",
     "archivo_fuente": "text",
     "url_fuente": "text",
+    "alto_cargo": "boolean",
 }
 
 
@@ -577,6 +640,9 @@ def armar_declaraciones(conn: Connection) -> int:
                 carga=_CARGA,
                 columnas=", ".join(destino),
                 originales=", ".join(originales),
+                veces_mediana=_VECES_MEDIANA_INVEROSIMIL,
+                veces_salto=_VECES_SALTO_INVEROSIMIL,
+                veces_ingresos=_VECES_INGRESOS_INVEROSIMIL,
             )
         )
     )
@@ -759,6 +825,10 @@ def ficha_declaraciones(conn: Connection) -> FichaTabla:
         f"Incluye {alcance}. No incluye el grupo familiar.",
         "Los totales que la Oficina Anticorrupción publicó multiplicados por 10 se toman de "
         "un corte sano o se corrigen contra el detalle (columna corregido_x10).",
+        "inverosimil marca montos imposibles del registro publicado (un inmueble de "
+        "$250.000 millones, un patrimonio 1.000 veces los ingresos): no son comparables. "
+        "alto_cargo marca a las autoridades (gabinete, titulares de organismos, directores "
+        "nacionales, embajadores, legisladores, jueces).",
         *(_NOTAS_FUENTE[f] for f in fuentes if f in _NOTAS_FUENTE),
         f"Fuentes: {'; '.join(_LICENCIAS.get(f, f) for f in fuentes)}.",
     ]
@@ -1131,6 +1201,16 @@ def cargar_oa(
             filas_detalle(plan.deudas, oa.TIPO_DEUDAS, cuentas),
         )
         corregidas = armar_declaraciones(conn)
+        inverosimiles = {
+            str(regla): int(n)
+            for regla, n in conn.execute(
+                text(
+                    f'SELECT regla, count(*) FROM raw."{TABLA_DECLARACIONES}__nueva", '
+                    "unnest(inverosimil) AS regla WHERE fuente = :f GROUP BY regla"
+                ),
+                {"f": oa.FUENTE},
+            )
+        }
         otras = _conservar_otras_fuentes(conn, oa.FUENTE)
         for tabla in (TABLA_DECLARACIONES, TABLA_BIENES, TABLA_DEUDAS):
             _indexar(conn, tabla)
@@ -1160,6 +1240,7 @@ def cargar_oa(
         "deudas": detalle_nuevo[TABLA_DEUDAS],
         "detalle_huerfano": dict(cuentas.huerfanas),
         "corregidas_x10": corregidas,
+        "inverosimiles_por_regla": inverosimiles,
         "otras_fuentes_conservadas": otras,
         "filas_invalidas": dict(cuentas.invalidas),
         "filas_repetidas": dict(cuentas.repetidas),

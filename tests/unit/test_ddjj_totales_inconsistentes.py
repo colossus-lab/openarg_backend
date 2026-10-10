@@ -150,6 +150,52 @@ def test_el_motivo_se_lo_atribuye_al_registro_no_a_la_persona() -> None:
         assert palabra not in motivo.lower()
 
 
+# Los casos del 10-oct-2026 («Top 10 ddjj gobierno»): el error está dentro del
+# detalle, así que el total cierra y H005 no los ve. La carga los marca
+# `inverosimil` (reglas en `ddjj_tasks._SQL_ARMAR`).
+CASA_DE_250_MIL_MILLONES = {
+    **_fila("FLORES ALDO JAVIER", bienes=250_007 * M, inicio=250_007 * M, detalle=250_007 * M),
+    "tipo": "Inicial",
+    "inverosimil": ["inmueble"],
+}
+FONDO_POR_MIL = {
+    **_fila(
+        "SETTECASI TAMARA ANDREA",
+        bienes=33_692.98 * M,
+        inicio=10.62 * M,
+        detalle=33_692.98 * M,
+        ingresos=23.09 * M,
+    ),
+    "ingresos_no_alcanzados": Decimal("11649140.19"),
+    "inverosimil": ["salto", "ingresos"],
+}
+
+
+def test_la_fila_inverosimil_sale_marcada_con_su_motivo() -> None:
+    fila = da.registro(CASA_DE_250_MIL_MILLONES, [])
+    assert fila["inconsistente"] is True
+    assert fila["variacion_patrimonial"] is None
+    motivo = fila["motivo_inconsistencia"]
+    assert motivo.startswith("En el registro de la Oficina Anticorrupción")
+    assert "un inmueble en el país figura valuado" in motivo
+    assert "probable error de carga" in motivo
+    assert "FLORES" not in motivo
+
+
+def test_el_motivo_inverosimil_trae_los_numeros() -> None:
+    motivo = da.registro(FONDO_POR_MIL, [])["motivo_inconsistencia"]
+    assert "los bienes al cierre ($33.693,0 millones) son 3.172 veces los del inicio" in motivo
+    assert "es 1.459 veces los ingresos declarados del año ($23,1 millones)" in motivo
+    for palabra in ("ocult", "enriquec", "sospech", "irregular"):
+        assert palabra not in motivo.lower()
+
+
+def test_la_fila_inverosimil_no_lleva_tarjeta_ni_barra() -> None:
+    result = _ranking(COHERENTE, CASA_DE_250_MIL_MILLONES)
+    assert "FLORES ALDO JAVIER" not in _names(_extract_documents([result]))
+    assert "FLORES ALDO JAVIER" not in _bars(build_deterministic_charts([result]))
+
+
 def test_la_fila_coherente_no_se_marca() -> None:
     fila = da.registro(COHERENTE, [])
     assert fila["inconsistente"] is False
@@ -279,7 +325,29 @@ async def test_herramienta_ranking_avisa_cuantas_excluyo_pero_no_quien() -> None
         "poder": None,
         "organismo": None,
         "cargo": "diputado nacional",
+        "altos_cargos": False,
     }
+
+
+@pytest.mark.parametrize("accion", ["ranking", "estadisticas"])
+async def test_herramienta_pasa_altos_cargos(accion: str) -> None:
+    """«Top 10 ddjj gobierno» (10-oct-2026) rankeó a los 46 mil declarantes del
+    Ejecutivo; con `altos_cargos` quedan las autoridades."""
+    falso = _DDJJFalso(_ranking(COHERENTE))
+    await DeclaracionesJuradas().run(
+        {"accion": accion, "poder": "ejecutivo", "altos_cargos": True}, _ctx(falso)
+    )
+    [(_, _, kw)] = falso.pedidos
+    assert kw["altos_cargos"] is True and kw["poder"] == "ejecutivo"
+
+
+def test_la_descripcion_manda_el_gobierno_a_altos_cargos() -> None:
+    description = DeclaracionesJuradas.spec.description
+    assert "«el gobierno»" in description
+    assert "`altos_cargos: true`" in description
+    assert DeclaracionesJuradas.spec.input_schema["properties"]["altos_cargos"]["type"] == (
+        "boolean"
+    )
 
 
 async def test_herramienta_estadisticas_trae_lo_que_promete_la_descripcion() -> None:

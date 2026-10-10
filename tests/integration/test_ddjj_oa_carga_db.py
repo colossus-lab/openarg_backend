@@ -512,3 +512,241 @@ def test_caba_guardian(engine, tmp_path):
         dt.cargar_caba(
             engine, _caba(otra, {2026: _filas_caba(2026, 200, 5)}), permitir_menos_filas=False
         )
+
+
+# ── inverosímiles y altos cargos (10-oct-2026) ──────────────────────────────
+
+_PRINCIPAL_COMPLETO = [*_PRINCIPAL, "ingresos_no_alcanzados"]
+
+
+def _dj_real(
+    dj_id,
+    nombre,
+    organismo,
+    cargo,
+    bi,
+    bc,
+    *,
+    tipo="Anual",
+    dc="0.00",
+    ingresos="0.00",
+    no_alcanzados="0.00",
+):
+    return [
+        str(dj_id),
+        f"20{dj_id:09d}",
+        "2024",
+        tipo,
+        "0",
+        nombre,
+        "PUBLICO",
+        organismo,
+        cargo,
+        "202001",
+        bi,
+        "0.00",
+        bc,
+        dc,
+        ingresos,
+        "0.00",
+        no_alcanzados,
+    ]
+
+
+def _bien(dj_id, periodo, tipo, descripcion, importe):
+    return [
+        str(dj_id),
+        "",
+        "2024",
+        periodo,
+        tipo,
+        descripcion,
+        "INGRESOS PROPIOS",
+        "100.00",
+        importe,
+    ]
+
+
+_CASA = "Tipo: CASA -Destino: CASA HABITACION -Localidad: Cap Fed"
+_DEPTO = "Tipo: DEPARTAMENTO -Destino: CASA HABITACION -Localidad: CIUDAD DE BUENOS AIRES"
+
+
+def _archivos_reales(tmp_path) -> list[oa.Archivo]:
+    """Las cifras del ranking «Top 10 ddjj gobierno» de 2024, tal como las publica
+    la OA, más diez declaraciones comunes ($30 M) para que la mediana sea real."""
+    principal = [
+        _dj_real(
+            100 + i,
+            f"COMUN {i}",
+            "MINISTERIO DE SALUD",
+            "Analista",
+            "25000000.00",
+            "30000000.00",
+            ingresos="20000000.00",
+        )
+        for i in range(10)
+    ]
+    bienes = [
+        _bien(100 + i, "C", "DEPOSITO DE DINERO EN EL PAIS", "Caja", "30000000.00")
+        for i in range(10)
+    ]
+    bienes += [
+        _bien(100 + i, "I", "DEPOSITO DE DINERO EN EL PAIS", "Caja", "25000000.00")
+        for i in range(10)
+    ]
+    principal += [
+        # Inicial: una casa en Capital de $250.000 M.
+        _dj_real(
+            1,
+            "FLORES ALDO JAVIER",
+            "FUERZA AEREA ARGENTINA",
+            "Jefe Diseño Grafico",
+            "250007000000.00",
+            "0.00",
+            tipo="Inicial",
+        ),
+        # Un departamento de $100.000 M al inicio y al cierre; cobra $28 M.
+        _dj_real(
+            2,
+            "CASCABELO MARTIN GABRIEL",
+            "POLICIA FEDERAL ARGENTINA",
+            "SUBCOMISARIO",
+            "100029068180.90",
+            "100036194159.16",
+            ingresos="28001707.69",
+        ),
+        # De $98 M a $82.597 M en un año (fondos comunes ×1000).
+        _dj_real(
+            3,
+            "RIAL ESTEBAN JORGE",
+            "SERVICIO NACIONAL DE SANIDAD",
+            "COORD. REGIONAL",
+            "98262134.64",
+            "82597507132.08",
+        ),
+        # Lo mismo, con $23 M de ingresos.
+        _dj_real(
+            4,
+            "SETTECASI TAMARA ANDREA",
+            "MINISTERIO DE JUSTICIA",
+            "Encargada Titular",
+            "10618150.40",
+            "33692540921.44",
+            ingresos="23093665.61",
+        ),
+        # Real: $1 M de ingresos netos pero $2.711 M no alcanzados por ganancias.
+        _dj_real(
+            5,
+            "DAZA NARBONA JOSE LUIS",
+            "MINISTERIO DE ECONOMIA",
+            "SECRETARIO DE POLITICA ECONOMICA",
+            "18421797421.68",
+            "24514308744.54",
+            dc="3318730882.32",
+            ingresos="1000000.00",
+            no_alcanzados="2711515215.66",
+        ),
+        # Sin organismo: el cargo alcanza para el poder y el alto cargo.
+        _dj_real(
+            6,
+            "CAPUTO LUIS ANDRES",
+            "",
+            "Ministro de Economia",
+            "9000000000.00",
+            "11700000000.00",
+            ingresos="338600000.00",
+        ),
+        # Inicial: un departamento en CABA "Destino: OTROS" de $12.000 M (en su
+        # baja, el mismo departamento vale $150.000).
+        _dj_real(
+            7,
+            "FERRER MARIA LUJAN",
+            "MINISTERIO DE SEGURIDAD",
+            "DIRECTORA NACIONAL",
+            "12000000000.00",
+            "0.00",
+            tipo="Inicial",
+        ),
+        # Un campo de $20.000 M con ingresos acordes: la tierra rural puede valer eso.
+        _dj_real(
+            8,
+            "RURAL CON CAMPO",
+            "INSTITUTO NACIONAL DE TECNOLOGIA AGROPECUARIA",
+            "Investigador",
+            "18000000000.00",
+            "20000000000.00",
+            ingresos="1000000000.00",
+        ),
+    ]
+    bienes += [
+        _bien(
+            7, "I", "INMUEBLES EN EL PAIS", "Tipo: DEPARTAMENTO -Destino: OTROS", "12000000000.00"
+        ),
+        _bien(8, "I", "INMUEBLES EN EL PAIS", "Tipo: RURALES CON VIVIENDA", "18000000000.00"),
+        _bien(8, "C", "INMUEBLES EN EL PAIS", "Tipo: RURALES CON VIVIENDA", "20000000000.00"),
+        _bien(1, "I", "INMUEBLES EN EL PAIS", _CASA, "250000000000.00"),
+        _bien(1, "I", "AUTOMOTORES EN EL PAIS", "Sandero", "7000000.00"),
+        _bien(2, "I", "INMUEBLES EN EL PAIS", _DEPTO, "100000000000.00"),
+        _bien(2, "I", "DEPOSITO DE DINERO EN EL PAIS", "Caja", "29068180.90"),
+        _bien(2, "C", "INMUEBLES EN EL PAIS", _DEPTO, "100000000000.00"),
+        _bien(2, "C", "DEPOSITO DE DINERO EN EL PAIS", "Caja", "36194159.16"),
+        _bien(3, "I", "DEPOSITO DE DINERO EN EL PAIS", "Caja", "98262134.64"),
+        _bien(3, "C", "ACCIONES -FONDOS COMUNES -DE INVERSION", "Galileo", "82502481974.90"),
+        _bien(
+            3, "C", "INMUEBLES EN EL PAIS", "Tipo: CASA -Destino: CASA HABITACION", "95025157.18"
+        ),
+        _bien(4, "I", "DEPOSITO DE DINERO EN EL PAIS", "Caja", "10618150.40"),
+        _bien(4, "C", "ACCIONES -FONDOS COMUNES -DE INVERSION", "Pionero", "33670175822.67"),
+        _bien(4, "C", "AUTOMOTORES EN EL PAIS", "Sandero", "22365098.77"),
+        _bien(5, "I", "TITULOS Y ACCIONES EN EL EXTERIOR", "Cartera", "18421797421.68"),
+        _bien(
+            5,
+            "C",
+            "INMUEBLES EN EL EXTERIOR",
+            "Tipo: DEPARTAMENTO -Localidad: NEW YORK",
+            "9600000000.00",
+        ),
+        _bien(5, "C", "DEPOSITOS DE DINERO EN EL EXTERIOR", "Cuenta", "14914308744.54"),
+        _bien(6, "I", "DEPOSITOS DE DINERO EN EL EXTERIOR", "Cuenta", "9000000000.00"),
+        _bien(6, "C", "DEPOSITOS DE DINERO EN EL EXTERIOR", "Cuenta", "11700000000.00"),
+    ]
+    miembros = {
+        "declaraciones-juradas-2024-consolidado-al-20250218.csv": _csv(
+            _PRINCIPAL_COMPLETO, principal
+        ),
+        "declaraciones-juradas-bienes-2024-consolidado-al-20250218.csv": _csv(_BIENES, bienes),
+        "declaraciones-juradas-deudas-2024-consolidado-al-20250218.csv": _csv(
+            _DEUDAS,
+            [["5", "", "2024", "C", "PRESTAMO", "BANCO", "ARGENTINA", "Otras", "3318730882.32"]],
+        ),
+    }
+    return _armar_zip(tmp_path, "oa-reales.zip", miembros)
+
+
+def test_marca_los_montos_inverosimiles_y_los_altos_cargos(engine, tmp_path):
+    resumen = dt.cargar_oa(
+        engine, dt.armar_plan(_archivos_reales(tmp_path)), permitir_menos_filas=False
+    )
+    d = _declaraciones(engine)
+
+    # El error está dentro del detalle: el total cierra y H005 no lo ve.
+    assert not any(f["inconsistente"] for f in d.values())
+    assert d[1]["inverosimil"] == ["inmueble"]  # inicial: sólo el inmueble
+    assert d[2]["inverosimil"] == ["inmueble", "ingresos"]
+    assert d[3]["inverosimil"] == ["salto"]  # sin ingresos: la regla no aplica
+    assert d[4]["inverosimil"] == ["salto", "ingresos"]
+    # Daza y Caputo son reales: su patrimonio es pocas veces sus ingresos (el
+    # mayor de los declarados, no sólo los netos).
+    assert d[5]["inverosimil"] is None and d[6]["inverosimil"] is None
+    # Cualquier inmueble en el país, no sólo la casa-habitación…
+    assert d[7]["inverosimil"] == ["inmueble"]
+    # …salvo los rurales.
+    assert d[8]["inverosimil"] is None
+    assert all(d[100 + i]["inverosimil"] is None for i in range(10))
+    assert resumen["inverosimiles_por_regla"] == {"inmueble": 3, "salto": 2, "ingresos": 2}
+
+    # Altos cargos: el secretario, el ministro sin organismo y la directora
+    # nacional, no el resto.
+    assert d[5]["alto_cargo"] and d[6]["alto_cargo"] and d[7]["alto_cargo"]
+    assert d[6]["poder"] == "ejecutivo"
+    assert not any(d[k]["alto_cargo"] for k in (1, 2, 3, 4, 100))

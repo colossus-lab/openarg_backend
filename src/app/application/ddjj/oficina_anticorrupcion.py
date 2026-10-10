@@ -46,6 +46,8 @@ from datetime import date
 from decimal import Decimal, InvalidOperation
 from typing import IO
 
+from app.application.ddjj import jerarquia
+
 FUENTE = "oficina_anticorrupcion"
 JURISDICCION = "nacional"
 URL_DATASET = "https://datos.jus.gob.ar/dataset/declaraciones-juradas-patrimoniales-integrales"
@@ -265,7 +267,8 @@ _PODER_POR_ORGANISMO: tuple[tuple[str, tuple[str, ...]], ...] = (
 # "DIPUTADO NACIONAL", a veces mal escrito ("DIUTADA", "dipurado").
 _PODER_POR_CARGO_FUERTE: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("legislativo", ("DIPUTAD", "DIUTAD", "DIPURAD", "SENADOR", "LEGISLADOR")),
-    ("judicial", ("JUEZ", "JUEZA", "CAMARISTA")),
+    # "MINISTRO DE LA CORTE SUPREMA" no es un ministro del Ejecutivo.
+    ("judicial", ("JUEZ", "JUEZA", "CAMARISTA", "CORTE SUPREMA")),
 )
 # Sin organismo (12 % de las filas de 2024), el cargo también sirve con claves
 # más ambiguas: "FISCAL" con organismo puede ser un asesor fiscal de ARCA.
@@ -292,6 +295,11 @@ def poder_de(organismo: str | None, cargo: str | None = None) -> str:
     poder = None if "CANDIDAT" in car else _por_claves(car, _PODER_POR_CARGO_FUERTE)
     if poder is None and org:
         poder = _por_claves(org, _PODER_POR_ORGANISMO) or "ejecutivo"
+    # Sin organismo, el cargo de un ministro o un secretario alcanza: Milei,
+    # Caputo, Werthein y Cuneo Libarona declaran 2024 sin organismo y quedaban
+    # fuera de todo ranking del Ejecutivo.
+    if poder is None and jerarquia.es_autoridad_ejecutivo(cargo):
+        poder = "ejecutivo"
     if poder is None:
         poder = _por_claves(car, _PODER_POR_CARGO)
     return poder or "sin_dato"
@@ -325,6 +333,7 @@ COLUMNAS_DECLARACION: tuple[str, ...] = (
     "corte",
     "archivo_fuente",
     "url_fuente",
+    "alto_cargo",
 )
 
 COLUMNAS_BIEN: tuple[str, ...] = (
@@ -385,6 +394,7 @@ def fila_declaracion(fila: Mapping[str, str | None], archivo: Archivo) -> tuple 
         return None
     organismo = _texto(fila, "organismo")
     cargo = _texto(fila, "cargo")
+    poder = poder_de(organismo, cargo)
     tipo = _TIPOS_DJ.get((fila.get("tipo_declaracion_jurada_descripcion") or "").strip().lower())
     heredados = parse_monto(fila.get("bienes_heredados"))
     if heredados is None:
@@ -393,7 +403,7 @@ def fila_declaracion(fila: Mapping[str, str | None], archivo: Archivo) -> tuple 
         FUENTE,
         int((fila.get("dj_id") or "").strip()),
         JURISDICCION,
-        poder_de(organismo, cargo),
+        poder,
         (fila.get("cuit") or "").strip(),
         _texto(fila, "funcionario_apellido_nombre"),
         _entero(fila.get("anio")) or archivo.anio,
@@ -415,6 +425,7 @@ def fila_declaracion(fila: Mapping[str, str | None], archivo: Archivo) -> tuple 
         archivo.corte,
         archivo.nombre,
         archivo.url,
+        jerarquia.es_alto_cargo(cargo, organismo, poder, sector=_texto(fila, "sector")),
     )
 
 

@@ -149,6 +149,22 @@ def test_clasificar_ignora_lo_que_no_es_consolidado():
         ("MINISTERIO DE JUSTICIA", "Ministro de Justicia y Derechos Humanos", "ejecutivo"),
         ("", "Director de Compras", "sin_dato"),
         (None, None, "sin_dato"),
+        # Sin organismo, el cargo de una autoridad del Ejecutivo alcanza: Milei,
+        # Caputo, Werthein y Cuneo Libarona declaran 2024 así (10-oct-2026).
+        ("", "Presidente de la Nación", "ejecutivo"),
+        ("", "Ministro de Economia", "ejecutivo"),
+        ("", "MINISTRO DE JUSTICIA DE LA NACION", "ejecutivo"),
+        ("", "Ministro de Relac. Ext. Com. Int. y Culto", "ejecutivo"),
+        ("", "Embajador Extraordinario y Plenipotenciario", "ejecutivo"),
+        ("", "Secretario de Economia del Conocimiento", "ejecutivo"),
+        ("", "SUBSECRETARIA DE RELACIONES DEL TRABAJO", "ejecutivo"),
+        # …pero no los de una universidad, una embajada o un juzgado.
+        ("", "SECRETARIA ACADEMICA", "sin_dato"),
+        ("", "SECRETARIO DE EMBAJADA Y CONSUL DE TERCERA CLASE", "sin_dato"),
+        ("", "Ministro de Segunda (EFRAN)", "sin_dato"),
+        ("", "Asesora Ministro de Justicia de la Nación", "sin_dato"),
+        # Un ministro de la Corte no es del Ejecutivo.
+        ("", "MINISTRO DE LA CORTE SUPREMA DE JUSTICIA", "judicial"),
     ],
 )
 def test_poder_de(organismo, cargo, poder):

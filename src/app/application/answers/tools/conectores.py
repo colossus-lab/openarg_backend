@@ -1091,7 +1091,15 @@ class DeclaracionesJuradas:
             "o el nombre: 'ARCA' también trae lo declarado como AFIP; 'ANSES', 'PAMI', 'INTA', "
             "'SENASA', 'CONICET', 'BCRA', 'UBA', 'SENADO', 'DIPUTADOS'…) o `cargo` (p. ej. "
             "'diputado nacional', 'ministro'). Para «diputados» o «senadores», usá `cargo`: `poder` "
-            "legislativo incluye también a sus empleados. Los montos son nominales; al comparar "
+            "legislativo incluye también a sus empleados. Sin `altos_cargos`, ranking y "
+            "estadísticas abarcan a TODOS los que declaran (46 mil en el Poder Ejecutivo: "
+            "inspectores, policías, docentes). Con `altos_cargos: true` quedan sólo las "
+            "autoridades: Presidente, Jefe de Gabinete, ministros, secretarios, subsecretarios, "
+            "titulares de organismos y empresas del Estado, directores nacionales y embajadores "
+            "(y en los otros poderes, legisladores, jueces, procurador y defensor general). "
+            "Para «el gobierno», «funcionarios», «el gabinete», «autoridades» o «los que "
+            "gobiernan», usá `poder` ejecutivo con `altos_cargos: true`; para «empleados de "
+            "ARCA» o «todos los que declaran», no. Los montos son nominales; al comparar "
             "años decí que no están ajustados por inflación. "
             "No califiques ninguna variación, patrimonio ni ingreso como sospechoso o llamativo "
             "ni lo atribuyas a nada. La cifra de una persona va con su nombre y el año de la "
@@ -1102,8 +1110,9 @@ class DeclaracionesJuradas:
             "DDJJ de un funcionario por su nombre. En ese caso, la cifra propia de una persona, "
             "sólo si la pregunta la nombra. "
             "Una fila con `inconsistente: true` es un registro publicado cuyo total de bienes no "
-            "cierra con la propia DDJJ, probable error de carga no verificado (el motivo está en "
-            "la fila), y esa cifra no es comparable. Una fila con `ingresos_inconsistentes: "
+            "cierra con la propia DDJJ o que trae un monto inverosímil (un inmueble valuado "
+            "en cientos de miles de millones), probable error de carga no verificado (el motivo "
+            "está en la fila), y esa cifra no es comparable. Una fila con `ingresos_inconsistentes: "
             "true` declara un ahorro que no se refleja en sus bienes: no lo presentes como error "
             "de la persona ni como irregularidad. `inconsistente` la saca de rankings y "
             "estadísticas; `ingresos_inconsistentes`, sólo del ranking por ingresos: sus bienes "
@@ -1145,6 +1154,10 @@ class DeclaracionesJuradas:
                 },
                 "organismo": {"type": "string"},
                 "cargo": {"type": "string"},
+                "altos_cargos": {
+                    "type": "boolean",
+                    "description": "Sólo autoridades (ranking y estadísticas).",
+                },
                 "ordenar_por": {"type": "string", "enum": ["patrimonio", "ingresos", "bienes"]},
                 "orden": {"type": "string", "enum": ["desc", "asc"]},
                 "cantidad": {"type": "integer", "minimum": 1, "maximum": 50},
@@ -1165,6 +1178,7 @@ class DeclaracionesJuradas:
             "organismo": str_arg(args, "organismo", max_len=120),
             "cargo": str_arg(args, "cargo", max_len=120),
         }
+        altos_cargos = args.get("altos_cargos") in (True, "true", 1)
         if accion == "buscar":
             nombre = str_arg(args, "nombre", required=True, max_len=120) or ""
             result = await ddjj.search(nombre, 10, anio=anio, jurisdiccion=jurisdiccion)
@@ -1178,6 +1192,7 @@ class DeclaracionesJuradas:
                 str_arg(args, "orden", max_len=4) or "desc",
                 anio=anio,
                 jurisdiccion=jurisdiccion or "nacional",
+                altos_cargos=altos_cargos,
                 **filtros,
             )
         elif accion == "actividades":
@@ -1198,7 +1213,12 @@ class DeclaracionesJuradas:
                 cargo=filtros["cargo"],
             )
         elif accion == "estadisticas":
-            result = await ddjj.stats(anio=anio, jurisdiccion=jurisdiccion or "nacional", **filtros)
+            result = await ddjj.stats(
+                anio=anio,
+                jurisdiccion=jurisdiccion or "nacional",
+                altos_cargos=altos_cargos,
+                **filtros,
+            )
         else:
             raise ToolInputError(
                 "`accion` es buscar, evolucion, ranking, estadisticas o actividades."
