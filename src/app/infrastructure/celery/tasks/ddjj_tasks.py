@@ -475,8 +475,13 @@ def _conservar_otras_fuentes(conn: Connection, fuente: str) -> int:
 #   $33.670.175.822; ella misma anotó en el origen de los fondos "OJO! Sistema
 #   toma mal el dato de B.Personales. Valor correcto: 33.670.175-82". Contra la
 #   mediana del patrimonio del año (para que el umbral no dependa de la
-#   inflación; en 2024, 150 veces la mediana son ~$4.860 M):
-#   - `vivienda`: la casa-habitación en el país vale más que el umbral.
+#   inflación; en 2024, 150 veces la mediana son ~$4.500 M):
+#   - `inmueble`: un inmueble en el país vale más que el umbral. Sin los
+#     rurales, donde el valor de la tierra puede ser real. Al principio era sólo
+#     la casa-habitación, y dejaba pasar a una directora nacional con un
+#     departamento en CABA "Destino: OTROS" de $12.000.000.000 (en su baja, el
+#     mismo departamento vale $150.000) y a un ordenanza con una casa en
+#     alquiler de $200.000 M.
 #   - `salto`: anual o baja, patrimonio sobre el umbral y bienes al cierre más
 #     de 100 veces los del inicio.
 #   - `ingresos`: anual o baja, patrimonio sobre el umbral y más de 1.000 veces
@@ -534,20 +539,20 @@ _SQL_ARMAR = """
         SELECT anio AS med_anio,
                {veces_mediana} * percentile_cont(0.5) WITHIN GROUP (ORDER BY pat) AS umbral
         FROM m WHERE pat > 0 GROUP BY anio
-    ), viv AS (
-        SELECT dj_id AS viv_dj,
-               max(importe) FILTER (WHERE periodo = 'inicio') AS viv_i,
-               max(importe) FILTER (WHERE periodo = 'cierre') AS viv_c
+    ), inm AS (
+        SELECT dj_id AS inm_dj,
+               max(importe) FILTER (WHERE periodo = 'inicio') AS inm_i,
+               max(importe) FILTER (WHERE periodo = 'cierre') AS inm_c
         FROM raw."{bienes}__nueva"
         WHERE upper(tipo) LIKE 'INMUEBLES EN EL PA%'
-          AND translate(upper(descripcion), 'ÁÉÍÓÚ', 'AEIOU') LIKE '%CASA HABITACION%'
+          AND upper(coalesce(descripcion, '')) NOT LIKE '%RURAL%'
         GROUP BY dj_id
     ), mm AS (
         SELECT m.*, med.umbral,
-               CASE WHEN tipo = 'Inicial' THEN viv.viv_i ELSE viv.viv_c END AS vivienda
+               CASE WHEN tipo = 'Inicial' THEN inm.inm_i ELSE inm.inm_c END AS inmueble
         FROM m
         LEFT JOIN med ON med.med_anio = m.anio
-        LEFT JOIN viv ON viv.viv_dj = m.dj_id
+        LEFT JOIN inm ON inm.inm_dj = m.dj_id
     )
     SELECT {originales},
            bi, di, bc, dc,
@@ -572,7 +577,7 @@ _SQL_ARMAR = """
                     AND coalesce(ingresos_netos, 0) - coalesce(gastos_personales, 0) > 10 * base,
                     false),
            NULLIF(array_remove(ARRAY[
-               CASE WHEN vivienda > umbral THEN 'vivienda' END,
+               CASE WHEN inmueble > umbral THEN 'inmueble' END,
                CASE WHEN coalesce(tipo, '') <> 'Inicial' AND pat > umbral AND bi > 0
                          AND bc > {veces_salto} * bi THEN 'salto' END,
                CASE WHEN coalesce(tipo, '') <> 'Inicial' AND pat > umbral AND ing > 0
@@ -820,7 +825,7 @@ def ficha_declaraciones(conn: Connection) -> FichaTabla:
         f"Incluye {alcance}. No incluye el grupo familiar.",
         "Los totales que la Oficina Anticorrupción publicó multiplicados por 10 se toman de "
         "un corte sano o se corrigen contra el detalle (columna corregido_x10).",
-        "inverosimil marca montos imposibles del registro publicado (una vivienda de "
+        "inverosimil marca montos imposibles del registro publicado (un inmueble de "
         "$250.000 millones, un patrimonio 1.000 veces los ingresos): no son comparables. "
         "alto_cargo marca a las autoridades (gabinete, titulares de organismos, directores "
         "nacionales, embajadores, legisladores, jueces).",

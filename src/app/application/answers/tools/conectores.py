@@ -1110,7 +1110,7 @@ class DeclaracionesJuradas:
             "DDJJ de un funcionario por su nombre. En ese caso, la cifra propia de una persona, "
             "sólo si la pregunta la nombra. "
             "Una fila con `inconsistente: true` es un registro publicado cuyo total de bienes no "
-            "cierra con la propia DDJJ o que trae un monto inverosímil (una vivienda valuada "
+            "cierra con la propia DDJJ o que trae un monto inverosímil (un inmueble valuado "
             "en cientos de miles de millones), probable error de carga no verificado (el motivo "
             "está en la fila), y esa cifra no es comparable. Una fila con `ingresos_inconsistentes: "
             "true` declara un ahorro que no se refleja en sus bienes: no lo presentes como error "
