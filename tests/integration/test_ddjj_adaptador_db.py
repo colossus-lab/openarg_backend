@@ -395,7 +395,7 @@ async def test_altos_cargos_e_inverosimiles(ddjj):
                 poder="ejecutivo",
                 patrimonio=250_007 * M,
             ),
-            "inverosimil": ["vivienda"],
+            "inverosimil": ["inmueble"],
         },
         {
             **_decl(
@@ -447,4 +447,4 @@ async def test_altos_cargos_e_inverosimiles(ddjj):
 
     [flores] = (await ddjj.search("flores aldo")).records
     assert flores["inconsistente"] is True
-    assert "una vivienda en el país figura valuada" in flores["motivo_inconsistencia"]
+    assert "un inmueble en el país figura valuado" in flores["motivo_inconsistencia"]

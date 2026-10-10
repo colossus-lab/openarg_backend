@@ -656,8 +656,34 @@ def _archivos_reales(tmp_path) -> list[oa.Archivo]:
             "11700000000.00",
             ingresos="338600000.00",
         ),
+        # Inicial: un departamento en CABA "Destino: OTROS" de $12.000 M (en su
+        # baja, el mismo departamento vale $150.000).
+        _dj_real(
+            7,
+            "FERRER MARIA LUJAN",
+            "MINISTERIO DE SEGURIDAD",
+            "DIRECTORA NACIONAL",
+            "12000000000.00",
+            "0.00",
+            tipo="Inicial",
+        ),
+        # Un campo de $20.000 M con ingresos acordes: la tierra rural puede valer eso.
+        _dj_real(
+            8,
+            "RURAL CON CAMPO",
+            "INSTITUTO NACIONAL DE TECNOLOGIA AGROPECUARIA",
+            "Investigador",
+            "18000000000.00",
+            "20000000000.00",
+            ingresos="1000000000.00",
+        ),
     ]
     bienes += [
+        _bien(
+            7, "I", "INMUEBLES EN EL PAIS", "Tipo: DEPARTAMENTO -Destino: OTROS", "12000000000.00"
+        ),
+        _bien(8, "I", "INMUEBLES EN EL PAIS", "Tipo: RURALES CON VIVIENDA", "18000000000.00"),
+        _bien(8, "C", "INMUEBLES EN EL PAIS", "Tipo: RURALES CON VIVIENDA", "20000000000.00"),
         _bien(1, "I", "INMUEBLES EN EL PAIS", _CASA, "250000000000.00"),
         _bien(1, "I", "AUTOMOTORES EN EL PAIS", "Sandero", "7000000.00"),
         _bien(2, "I", "INMUEBLES EN EL PAIS", _DEPTO, "100000000000.00"),
@@ -705,17 +731,22 @@ def test_marca_los_montos_inverosimiles_y_los_altos_cargos(engine, tmp_path):
 
     # El error está dentro del detalle: el total cierra y H005 no lo ve.
     assert not any(f["inconsistente"] for f in d.values())
-    assert d[1]["inverosimil"] == ["vivienda"]  # inicial: sólo la vivienda
-    assert d[2]["inverosimil"] == ["vivienda", "ingresos"]
+    assert d[1]["inverosimil"] == ["inmueble"]  # inicial: sólo el inmueble
+    assert d[2]["inverosimil"] == ["inmueble", "ingresos"]
     assert d[3]["inverosimil"] == ["salto"]  # sin ingresos: la regla no aplica
     assert d[4]["inverosimil"] == ["salto", "ingresos"]
     # Daza y Caputo son reales: su patrimonio es pocas veces sus ingresos (el
     # mayor de los declarados, no sólo los netos).
     assert d[5]["inverosimil"] is None and d[6]["inverosimil"] is None
+    # Cualquier inmueble en el país, no sólo la casa-habitación…
+    assert d[7]["inverosimil"] == ["inmueble"]
+    # …salvo los rurales.
+    assert d[8]["inverosimil"] is None
     assert all(d[100 + i]["inverosimil"] is None for i in range(10))
-    assert resumen["inverosimiles_por_regla"] == {"vivienda": 2, "salto": 2, "ingresos": 2}
+    assert resumen["inverosimiles_por_regla"] == {"inmueble": 3, "salto": 2, "ingresos": 2}
 
-    # Altos cargos: el secretario y el ministro sin organismo, no el resto.
-    assert d[5]["alto_cargo"] and d[6]["alto_cargo"]
+    # Altos cargos: el secretario, el ministro sin organismo y la directora
+    # nacional, no el resto.
+    assert d[5]["alto_cargo"] and d[6]["alto_cargo"] and d[7]["alto_cargo"]
     assert d[6]["poder"] == "ejecutivo"
     assert not any(d[k]["alto_cargo"] for k in (1, 2, 3, 4, 100))

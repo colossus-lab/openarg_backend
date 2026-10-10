@@ -156,7 +156,7 @@ def test_el_motivo_se_lo_atribuye_al_registro_no_a_la_persona() -> None:
 CASA_DE_250_MIL_MILLONES = {
     **_fila("FLORES ALDO JAVIER", bienes=250_007 * M, inicio=250_007 * M, detalle=250_007 * M),
     "tipo": "Inicial",
-    "inverosimil": ["vivienda"],
+    "inverosimil": ["inmueble"],
 }
 FONDO_POR_MIL = {
     **_fila(
@@ -177,7 +177,7 @@ def test_la_fila_inverosimil_sale_marcada_con_su_motivo() -> None:
     assert fila["variacion_patrimonial"] is None
     motivo = fila["motivo_inconsistencia"]
     assert motivo.startswith("En el registro de la Oficina Anticorrupción")
-    assert "una vivienda en el país figura valuada" in motivo
+    assert "un inmueble en el país figura valuado" in motivo
     assert "probable error de carga" in motivo
     assert "FLORES" not in motivo
 

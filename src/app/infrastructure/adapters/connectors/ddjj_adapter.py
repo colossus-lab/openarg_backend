@@ -187,9 +187,9 @@ def motivo_inverosimil(fila: Mapping[str, Any]) -> str | None:
     if not reglas:
         return None
     partes = []
-    if "vivienda" in reglas:
+    if "inmueble" in reglas:
         partes.append(
-            "una vivienda en el país figura valuada en más de 150 veces el patrimonio mediano "
+            "un inmueble en el país figura valuado en más de 150 veces el patrimonio mediano "
             "de las declaraciones de ese año"
         )
     inicio = _numero(fila.get("bienes_inicio")) or 0.0
