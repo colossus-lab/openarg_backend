@@ -19,6 +19,13 @@ Las cifras que no cierran se marcan al cargar (H005, ver `ddjj_tasks`):
   estadísticas.
 - `ingresos_inconsistentes`: el ahorro declarado no se refleja en los bienes.
   Queda fuera sólo del ranking por ingresos.
+- `inverosimil`: un monto imposible que sí cierra con el detalle porque el error
+  de tipeo está en el detalle (una casa de $250.000 millones). Se trata igual
+  que `inconsistente`: fuera de rankings y estadísticas, y la fila sale marcada
+  `inconsistente` con su motivo, así las tarjetas y los gráficos la ocultan.
+
+`alto_cargo` marca a las autoridades; `altos_cargos=True` acota rankings y
+estadísticas a ellas («el gobierno», ver `application/ddjj/jerarquia.py`).
 
 Las filas que se le pasan al modelo y al frontend conservan los nombres de
 antes (`patrimonio_cierre`, `bienes_detalle`, `resumen_bienes`…): las tarjetas
@@ -85,6 +92,9 @@ _PERSONA = "coalesce(cuit, nombre)"
 _SIN_TILDES = "translate(upper({col}), 'ÁÉÍÓÚÜÑ', 'AEIOUUN')"
 
 _ORDEN = {"patrimonio": "patrimonio", "bienes": "bienes", "ingresos": "ingresos_netos"}
+
+# Lo que queda fuera de rankings y estadísticas.
+_NO_COMPARABLE_SQL = "(inconsistente OR inverosimil IS NOT NULL)"
 
 _COBERTURA_TTL_S = 600
 
@@ -171,6 +181,41 @@ def motivo_inconsistencia(fila: Mapping[str, Any]) -> str | None:
     return f"{motivo}. {_NO_COMPARABLE}"
 
 
+def motivo_inverosimil(fila: Mapping[str, Any]) -> str | None:
+    """Por qué un monto es imposible (reglas de `ddjj_tasks._SQL_ARMAR`), o ``None``."""
+    reglas = fila.get("inverosimil") or []
+    if not reglas:
+        return None
+    partes = []
+    if "vivienda" in reglas:
+        partes.append(
+            "una vivienda en el país figura valuada en más de 150 veces el patrimonio mediano "
+            "de las declaraciones de ese año"
+        )
+    inicio = _numero(fila.get("bienes_inicio")) or 0.0
+    cierre = _numero(fila.get("bienes_cierre")) or 0.0
+    if "salto" in reglas and inicio > 0:
+        partes.append(
+            f"los bienes al cierre ({_millones(cierre)}) son {_veces(cierre / inicio)} veces "
+            f"los del inicio ({_millones(inicio)})"
+        )
+    patrimonio = _numero(fila.get("patrimonio")) or 0.0
+    ingresos = max(
+        _numero(fila.get(c)) or 0.0
+        for c in ("ingresos_netos", "ingresos_trabajo_alquileres_rentas", "ingresos_no_alcanzados")
+    )
+    if "ingresos" in reglas and ingresos > 0:
+        partes.append(
+            f"el patrimonio ({_millones(patrimonio)}) es {_veces(patrimonio / ingresos)} veces "
+            f"los ingresos declarados del año ({_millones(ingresos)})"
+        )
+    if not partes:
+        partes.append("un monto es inverosímil")
+    return (
+        "En el registro de la Oficina Anticorrupción, " + "; ".join(partes) + f". {_NO_COMPARABLE}"
+    )
+
+
 def motivo_ingresos(fila: Mapping[str, Any]) -> str | None:
     if not fila.get("ingresos_inconsistentes"):
         return None
@@ -214,7 +259,7 @@ def registro(
     marcas sólo cuando valen true: con todo, un top 20 pasaba el tope del
     contenido de la herramienta (FR-004a / FIX-007).
     """
-    motivo = motivo_inconsistencia(fila)
+    motivo = motivo_inconsistencia(fila) or motivo_inverosimil(fila)
     motivo_ing = motivo_ingresos(fila)
     fuente = str(fila.get("fuente") or "")
     row: dict[str, Any] = {
@@ -392,11 +437,14 @@ class DDJJAdapter:
         poder: str | None,
         organismo: str | None,
         cargo: str | None,
+        altos_cargos: bool = False,
     ) -> str:
         condiciones = []
         if poder:
             params["poder"] = poder
             condiciones.append("poder = :poder")
+        if altos_cargos:
+            condiciones.append("alto_cargo")
         if organismo:
             # Siglas y nombres viejos (ARCA/AFIP) o palabras enteras: ver
             # application/ddjj/organismos.py. El nombre se normaliza igual que ahí:
@@ -491,6 +539,7 @@ class DDJJAdapter:
         poder: str | None = None,
         organismo: str | None = None,
         cargo: str | None = None,
+        altos_cargos: bool = False,
     ) -> DataResult:
         fuente = JURISDICCIONES.get(jurisdiccion or "nacional", FUENTE_OA)
         if fuente == FUENTE_CABA and sort_by == "patrimonio":
@@ -499,8 +548,12 @@ class DDJJAdapter:
         columna = _ORDEN.get(sort_by, "patrimonio")
         anio = anio or await self._anio_por_defecto(fuente)
         params: dict[str, Any] = {"fuente": fuente, "anio": anio, "top": top}
-        filtros = self._filtros(params, poder=poder, organismo=organismo, cargo=cargo)
-        excluye = "inconsistente" + (" OR ingresos_inconsistentes" if sort_by == "ingresos" else "")
+        filtros = self._filtros(
+            params, poder=poder, organismo=organismo, cargo=cargo, altos_cargos=altos_cargos
+        )
+        excluye = _NO_COMPARABLE_SQL + (
+            " OR ingresos_inconsistentes" if sort_by == "ingresos" else ""
+        )
         direccion = "DESC" if order == "desc" else "ASC"
         base = (
             f"WITH base AS (SELECT DISTINCT ON ({_PERSONA}) * FROM {TABLA} "
@@ -526,7 +579,9 @@ class DDJJAdapter:
         quienes = {FUENTE_OA: "funcionarios nacionales", FUENTE_CABA: "funcionarios porteños"}[
             fuente
         ]
-        alcance = ", ".join(x for x in (poder, organismo, cargo) if x)
+        alcance = ", ".join(
+            x for x in (poder, "altos cargos" if altos_cargos else None, organismo, cargo) if x
+        )
         descripcion = (
             f"Ranking de {quienes} con {etiqueta} {sort_by} declarado en {anio}"
             + (f" ({alcance})" if alcance else "")
@@ -549,7 +604,7 @@ class DDJJAdapter:
             resultado.metadata["description"] += (
                 f" Se {verbo} {_declaraciones(len(excluidas))} que {habria} entrado en este "
                 "ranking: su registro publicado tiene cifras que no cierran con la propia DDJJ "
-                "(probable error de carga), así que no es comparable "
+                "o son inverosímiles (probable error de carga), así que no es comparable "
                 "(excluidas_por_inconsistencia)."
             )
         return resultado
@@ -562,23 +617,26 @@ class DDJJAdapter:
         poder: str | None = None,
         organismo: str | None = None,
         cargo: str | None = None,
+        altos_cargos: bool = False,
     ) -> DataResult:
         fuente = JURISDICCIONES.get(jurisdiccion or "nacional", FUENTE_OA)
         medida = "patrimonio" if fuente == FUENTE_OA else "bienes"
         anio = anio or await self._anio_por_defecto(fuente)
         params: dict[str, Any] = {"fuente": fuente, "anio": anio}
-        filtros = self._filtros(params, poder=poder, organismo=organismo, cargo=cargo)
+        filtros = self._filtros(
+            params, poder=poder, organismo=organismo, cargo=cargo, altos_cargos=altos_cargos
+        )
         base = (
             f"WITH base AS (SELECT DISTINCT ON ({_PERSONA}) * FROM {TABLA} "
             f"WHERE fuente = :fuente AND anio = :anio{filtros} "
             f"ORDER BY {_PERSONA}, {_PRIORIDAD_TIPO}, rectificativa DESC NULLS LAST, dj_id DESC), "
-            f"usables AS (SELECT * FROM base WHERE NOT inconsistente AND {medida} IS NOT NULL) "
+            f"usables AS (SELECT * FROM base WHERE NOT {_NO_COMPARABLE_SQL} AND {medida} IS NOT NULL) "
         )
         [agregado] = await self._filas(
             base
             + f"""
             SELECT (SELECT count(*) FROM base) AS total,
-                   (SELECT count(*) FROM base WHERE inconsistente) AS excluidas,
+                   (SELECT count(*) FROM base WHERE {_NO_COMPARABLE_SQL}) AS excluidas,
                    count(*) AS usables,
                    avg({medida}) AS promedio,
                    percentile_cont(0.5) WITHIN GROUP (ORDER BY {medida}) AS mediana,
@@ -602,7 +660,12 @@ class DDJJAdapter:
         fila: dict[str, Any] = {
             "total": int(agregado["total"]),
             "anio": anio,
-            "alcance": quienes + "".join(f", {x}" for x in (poder, organismo, cargo) if x),
+            "alcance": quienes
+            + "".join(
+                f", {x}"
+                for x in (poder, "altos cargos" if altos_cargos else None, organismo, cargo)
+                if x
+            ),
             f"{medida}_promedio": _numero(agregado["promedio"]),
             # La mediana de verdad: con una cantidad par, el promedio de los dos centrales.
             f"{medida}_mediano": _numero(agregado["mediana"]),
@@ -628,8 +691,8 @@ class DDJJAdapter:
             descripcion += (
                 f". Promedio, mediana, máximo y mínimo calculados sin "
                 f"{_declaraciones(int(agregado['excluidas']))} cuyo registro publicado tiene un "
-                "total de bienes que no cierra con su propio detalle (probable error de carga; "
-                "excluidas_por_inconsistencia)."
+                "total de bienes que no cierra con su propio detalle o un monto inverosímil "
+                "(probable error de carga; excluidas_por_inconsistencia)."
             )
         return self._resultado(
             f"Estadísticas DDJJ {anio}: {quienes}",

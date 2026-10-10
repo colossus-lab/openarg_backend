@@ -34,6 +34,7 @@ from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
 
+from app.application.ddjj import jerarquia
 from app.application.ddjj.oficina_anticorrupcion import parse_monto, poder_de
 
 FUENTE = "caba"
@@ -83,6 +84,7 @@ COLUMNAS_DECLARACION: tuple[str, ...] = (
     "corte",
     "archivo_fuente",
     "url_fuente",
+    "alto_cargo",
 )
 
 _RE_ANIO_URL = re.compile(r"declaraciones-juradas-(\d{4})\.csv", re.IGNORECASE)
@@ -159,14 +161,16 @@ def fila_declaracion(fila: Mapping[str, str | None], archivo: ArchivoCaba) -> tu
             continue
         por_tipo[clave] = _numero_json(valor)
         total += valor
+    # El dataset es del Poder Ejecutivo porteño: lo que el cargo no ubica en
+    # otro poder ("Controlador/A De Faltas", "Miembro de Junta Comunal") es suyo.
     poder = poder_de(None, cargo)
+    if poder == "sin_dato":
+        poder = "ejecutivo"
     return (
         FUENTE,
         int(dj_id),
         JURISDICCION,
-        # El dataset es del Poder Ejecutivo porteño: lo que el cargo no ubica en
-        # otro poder ("Controlador/A De Faltas", "Miembro de Junta Comunal") es suyo.
-        "ejecutivo" if poder == "sin_dato" else poder,
+        poder,
         nombre or None,
         int(anio),
         cargo,
@@ -177,4 +181,5 @@ def fila_declaracion(fila: Mapping[str, str | None], archivo: ArchivoCaba) -> tu
         archivo.corte,
         archivo.url.rsplit("/", 1)[-1],
         archivo.url,
+        jerarquia.es_alto_cargo(cargo, None, poder, ciudad=True),
     )
