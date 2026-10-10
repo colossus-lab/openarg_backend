@@ -149,6 +149,35 @@ el contenedor `backend` al arrancar (`alembic upgrade head` en su `command:`)
 y volver la imagen no las revierte. Verificar antes con
 `git diff --stat main..staging -- src/app/infrastructure/persistence_sqla/alembic/`.
 
+## Limpieza de imágenes
+
+Cada deploy congela unos 9 GB de imágenes con el alias `rollback-<fecha>` (§1).
+Los timers que ya tenían los servidores (`docker-cleanup` y `docker-prune`)
+borran por antigüedad de la imagen (`until=72h`), y con varios deploys por día
+todos los juegos son "recientes": el 2026-10-10 staging llegó al 98 % de disco
+con 13 juegos en tres días y el `pull` falló con "no space left on device".
+
+`openarg-limpiar-rollbacks.timer` corre cada hora en los dos servidores y deja
+**sólo los 2 juegos de rollback más nuevos**. Borra los alias (nunca una imagen
+que use un contenedor) y las capas sueltas. Las versiones viejas siguen en el
+registry como `:sha-<7>`.
+
+```bash
+journalctl -u openarg-limpiar-rollbacks.service -n 20 -o cat   # qué borró
+DRY_RUN=1 openarg-limpiar-rollbacks                            # qué borraría
+```
+
+Instalación (los archivos están en `scripts/servidor/`):
+
+```bash
+sudo install -m 755 limpiar_rollbacks.sh /usr/local/bin/openarg-limpiar-rollbacks
+sudo install -m 644 openarg-limpiar-rollbacks.service openarg-limpiar-rollbacks.timer /etc/systemd/system/
+sudo systemctl daemon-reload && sudo systemctl enable --now openarg-limpiar-rollbacks.timer
+```
+
+Si un deploy necesita volver más atrás que los 2 juegos locales, se baja la
+imagen del registry por su `:sha-<7>`.
+
 ## El compose de los servidores
 
 `docker-compose.prod.yml` de este repo describe lo que corre. Staging y prod
