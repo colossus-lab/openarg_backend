@@ -581,7 +581,22 @@ class SeriesTiempo:
         )
         if complete:
             payload["periodos"] = complete
-        return ToolOutcome(to_json(payload), results=[result])
+        results = [result]
+        if (
+            ids == [_IPC_NACIONAL]
+            and representation == "percent_change"
+            and frequency in (None, "month")
+            and not kwargs["end_date"]
+        ):
+            posteriores = await _ipc_months_after(ctx, result)
+            if posteriores is not None:
+                payload["meses_posteriores"] = {
+                    "fuente": posteriores.dataset_title,
+                    "filas": posteriores.records,
+                    "nota": _IPC_MONTHS_AFTER_NOTE,
+                }
+                results.append(posteriores)
+        return ToolOutcome(to_json(payload), results=results)
 
     async def _variation(
         self,
@@ -961,6 +976,46 @@ def _complete_period_sentences(
             f"{count_text}: la fuente llega hasta {end}."
         )
     return text
+
+
+# El IPC nacional de la API de Series de Tiempo se atrasa respecto del INDEC:
+# el 29-oct seguía en agosto con septiembre (1,9 %) publicado desde mediados de
+# octubre. Con sólo la pista en `cotizaciones`, en staging el agente igual
+# contestó «los últimos 12 meses» hasta agosto y el fact-check de septiembre
+# con septiembre de 2025, diciendo que el de 2026 «aún no está publicado». Por
+# eso la variación mensual del IPC trae sola los meses que faltan.
+_IPC_NACIONAL = "148.3_INIVELNAL_DICI_M_26"
+_IPC_MONTHS_AFTER_NOTE = (
+    "La API de Series de Tiempo todavía no tiene estos meses y el INDEC ya los publicó: "
+    "son la variación % mensual del mismo IPC nacional, según ArgentinaDatos. Incluilos "
+    "como los últimos meses y citá ArgentinaDatos con dato del INDEC."
+)
+
+
+async def _ipc_months_after(ctx: ToolContext, result: DataResult) -> DataResult | None:
+    """La inflación mensual de ArgentinaDatos posterior al último mes de la serie."""
+    conn = getattr(ctx.deps, "arg_datos", None)
+    if conn is None:
+        return None
+    last = str(result.records[-1].get("fecha", ""))[:7]
+    try:
+        inflacion = await conn.fetch_inflacion()
+    except ConnectorError:
+        return None
+    if inflacion is None or not last:
+        return None
+    rows = [r for r in inflacion.records or [] if str(r.get("fecha", ""))[:7] > last]
+    if not rows:
+        return None
+    return DataResult(
+        source=inflacion.source,
+        portal_name=inflacion.portal_name,
+        portal_url=inflacion.portal_url,
+        dataset_title="Inflación mensual del INDEC — ArgentinaDatos",
+        format=inflacion.format,
+        records=rows,
+        metadata={**(inflacion.metadata or {}), "units": "Variación % mensual del IPC"},
+    )
 
 
 def _missing_series_note(missing: list[str]) -> str:
