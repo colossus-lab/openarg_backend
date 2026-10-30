@@ -138,6 +138,8 @@ def _deps(**over: Any) -> MagicMock:
     deps = MagicMock()
     deps.sandbox = FakeSandbox()
     deps.staff = None
+    # Sin meses posteriores del IPC: la evidencia de cada caso es la que arma.
+    deps.arg_datos.fetch_inflacion = AsyncMock(return_value=None)
     deps.georef.normalize_location = AsyncMock(
         return_value=DataResult(
             source="georef",

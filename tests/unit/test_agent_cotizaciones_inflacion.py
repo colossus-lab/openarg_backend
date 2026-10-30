@@ -17,8 +17,10 @@ import pytest
 from app.application.answers.engine import EngineRequest
 from app.application.answers.tools.base import ToolContext, ToolInputError
 from app.application.answers.tools.catalogo import BuscarDatos
-from app.application.answers.tools.conectores import BuscarSeries, Cotizaciones
+from app.application.answers.tools.conectores import BuscarSeries, Cotizaciones, SeriesTiempo
 from app.domain.entities.connectors.data_result import DataResult
+from app.domain.exceptions.connector_errors import ConnectorError
+from app.domain.exceptions.error_codes import ErrorCode
 
 
 def _inflacion(meses: int) -> DataResult:
@@ -94,3 +96,90 @@ def test_buscar_datos_dice_como_esta_el_presupuesto_por_ejercicio() -> None:
     assert "«Desarrollo de la Educacion Superior»" in desc
     assert "ejercicio del año de hoy" in desc
     assert "Transversal financiero" in desc
+
+
+# ── series_tiempo completa el IPC con los meses que faltan ─────────────────
+
+_IPC = "148.3_INIVELNAL_DICI_M_26"
+_COLUMNA = "IPC. Nivel General Nacional. Base dic 2016. Mensual."
+
+
+def _ipc_hasta_agosto() -> DataResult:
+    return DataResult(
+        source="series_tiempo",
+        portal_name="API de Series de Tiempo",
+        portal_url=f"https://apis.datos.gob.ar/series/api/series/?ids={_IPC}",
+        dataset_title="Índice de Precios al Consumidor Nacional (IPC). Base diciembre 2016.",
+        format="time_series",
+        records=[
+            {"fecha": "2026-07-01", _COLUMNA: 2.11},
+            {"fecha": "2026-08-01", _COLUMNA: 1.66},
+        ],
+        metadata={"units": "Variación porcentual período anterior (en %)"},
+    )
+
+
+def _ctx_series(inflacion: DataResult | None) -> tuple[ToolContext, MagicMock]:
+    deps = MagicMock()
+    deps.series.fetch = AsyncMock(return_value=_ipc_hasta_agosto())
+    deps.arg_datos.fetch_inflacion = AsyncMock(return_value=inflacion)
+    return ToolContext(deps, EngineRequest("q", "u")), deps
+
+
+async def test_la_variacion_mensual_del_ipc_trae_septiembre_de_argentinadatos() -> None:
+    ctx, _ = _ctx_series(_inflacion(33))
+
+    outcome = await SeriesTiempo().run({"ids": [_IPC], "representacion": "percent_change"}, ctx)
+
+    payload = json.loads(outcome.content)
+    assert payload["meses_posteriores"]["filas"] == [{"fecha": "2026-09-30", "inflacion": 1.9}]
+    assert "ArgentinaDatos con dato del INDEC" in payload["meses_posteriores"]["nota"]
+    assert [r.dataset_title for r in outcome.results] == [
+        "Índice de Precios al Consumidor Nacional (IPC). Base diciembre 2016.",
+        "Inflación mensual del INDEC — ArgentinaDatos",
+    ]
+    assert outcome.results[1].records == [{"fecha": "2026-09-30", "inflacion": 1.9}]
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        # El índice, no la variación: no se mezclan unidades.
+        {"ids": [_IPC]},
+        # Un rango cerrado ya dice hasta dónde.
+        {"ids": [_IPC], "representacion": "percent_change", "hasta": "2026-08-01"},
+        # Otra serie.
+        {"ids": ["148.3_INUCLEONAL_DICI_M_19"], "representacion": "percent_change"},
+    ],
+)
+async def test_fuera_del_ipc_mensual_abierto_no_agrega_nada(args: dict) -> None:
+    ctx, deps = _ctx_series(_inflacion(33))
+
+    outcome = await SeriesTiempo().run(args, ctx)
+
+    assert "meses_posteriores" not in json.loads(outcome.content)
+    assert len(outcome.results) == 1
+    deps.arg_datos.fetch_inflacion.assert_not_awaited()
+
+
+async def test_si_argentinadatos_no_tiene_nada_nuevo_queda_la_serie_sola() -> None:
+    serie = _inflacion(20)
+    serie.records = [{"fecha": "2026-08-31", "inflacion": 1.66}]
+    ctx, _ = _ctx_series(serie)
+
+    outcome = await SeriesTiempo().run({"ids": [_IPC], "representacion": "percent_change"}, ctx)
+
+    assert "meses_posteriores" not in json.loads(outcome.content)
+    assert len(outcome.results) == 1
+
+
+async def test_argentinadatos_caido_no_rompe_la_serie() -> None:
+    ctx, deps = _ctx_series(None)
+    deps.arg_datos.fetch_inflacion = AsyncMock(
+        side_effect=ConnectorError(error_code=ErrorCode.CN_ARGENTINA_DATOS_UNAVAILABLE)
+    )
+
+    outcome = await SeriesTiempo().run({"ids": [_IPC], "representacion": "percent_change"}, ctx)
+
+    assert json.loads(outcome.content)["filas"][-1]["fecha"] == "2026-08-01"
+    assert len(outcome.results) == 1
