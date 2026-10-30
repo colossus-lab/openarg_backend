@@ -321,3 +321,36 @@ def test_zip_saltea_el_miembro_que_no_entra_y_conserva_lo_anterior(table, tmp_pa
     assert "b.csv" in (result["sampled_note"] or "")
     assert _count(engine, name) == 11
     assert _types(engine, name)["codigo"] == "bigint"
+
+
+def test_csv_con_punto_de_miles_llega_con_las_cantidades_enteras(table, tmp_path):
+    """Hackatón del 30-oct-2026: VALOR de educación superior («124», «1.475»,
+    «2.134» personas) se guardaba como double con máximo 999. Sin
+    `csv_params_override`, como en la colecta: el formato lo decide
+    `_detect_csv_params` con una muestra, y la carga por chunks lo respeta."""
+    engine, name = table
+    header = (
+        "ANIO;TIPO_UNIV;NIVEL_ACADEM;OF_ACADEM;DISCIP_OCDE;DISCIP_ESPECIF;TIPO_ALUMNO;U_MED;VALOR"
+    )
+    valores = [124, 1475, 119, 2134, 2]
+    valores += [(i * 7919 + i // 3) % (240_000 if i % 2 else 999) for i in range(1, 300)]
+    rows_ = [
+        f"{2014 + i % 10};Estatal;Grado;Otros;Ciencias Sociales;Disciplina {i % 37};"
+        f"{'ESTUDIANTES' if i % 2 else 'EGRESADOS'};Cantidad de personas;"
+        + f"{v:,}".replace(",", ".")
+        for i, v in enumerate(valores)
+    ]
+    csv_path = tmp_path / "educ.csv"
+    csv_path.write_text("\n".join([header, *rows_]) + "\n", encoding="latin-1")
+
+    rows, _columns, _truncated = ct._load_csv_chunked(
+        str(csv_path), name, engine, chunk_size=40, source_dataset_id=DATASET_ID
+    )
+
+    assert rows == len(valores) and _count(engine, name) == len(valores)
+    tipos = _types(engine, name)
+    assert tipos["VALOR"] == "bigint"
+    assert tipos["ANIO"] == "bigint"
+    assert tipos["U_MED"] == "text"
+    assert _scalar(engine, f'SELECT max("VALOR") FROM public."{name}"') == max(valores)  # noqa: S608
+    assert _scalar(engine, f'SELECT sum("VALOR") FROM public."{name}"') == sum(valores)  # noqa: S608

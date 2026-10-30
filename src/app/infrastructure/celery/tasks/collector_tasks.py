@@ -42,6 +42,12 @@ from app.application.pipeline.parsers import (
     time_column_ratio,
     unpivot_if_time_pivoted,
 )
+from app.application.pipeline.parsers.formato_numeros import (
+    decidir_formato as _decidir_formato_numeros,
+)
+from app.application.pipeline.parsers.formato_numeros import (
+    filas_de_muestra as _filas_de_muestra_formato,
+)
 
 # La inferencia de encabezado vive en la capa de aplicación desde el
 # 04-oct-2026 (ver el docstring del módulo). Los nombres privados se conservan
@@ -2481,6 +2487,61 @@ def _detect_encoding_robust(file_path: str) -> str:
 
 
 def _detect_csv_params(file_path: str) -> dict:
+    """Everything `pd.read_csv` needs for this file: dialect, then number format.
+
+    Every CSV path goes through here — the preview, the chunked load and each
+    ZIP member — so they all read numbers the same way.
+    """
+    params = _detect_csv_dialect(file_path)
+    params.update(_detect_csv_number_format(file_path, params))
+    return params
+
+
+def _detect_csv_number_format(file_path: str, params: dict) -> dict:
+    """Thousands/decimal marks and text-only columns, decided on a text sample.
+
+    Pandas defaults read `2.134` (2,134 people, Argentine thousands) as 2.134;
+    the decision itself lives in `formato_numeros`. If the sample cannot be
+    read, nothing is added and the file loads exactly as before.
+    """
+    read_params = {k: v for k, v in params.items() if not k.startswith("_")}
+    sample_path = file_path
+    if params.get("_outer_quoted_lines"):
+        sample_path = _sanitize_outer_quoted_lines(
+            file_path, encoding=params.get("encoding", "utf-8")
+        )
+
+    def _read_sample(read: dict) -> pd.DataFrame:
+        width = pd.read_csv(sample_path, nrows=1, dtype=str, **read).shape[1]
+        return pd.read_csv(sample_path, nrows=_filas_de_muestra_formato(width), dtype=str, **read)
+
+    # The same fallbacks the loaders use: latin-1 past the first lines, and
+    # the python engine when the C parser chokes.
+    try:
+        try:
+            sample = _read_sample(read_params)
+        except UnicodeDecodeError:
+            sample = _read_sample({**read_params, "encoding": "latin-1"})
+        except pd.errors.ParserError:
+            sample = _read_sample({**read_params, "engine": "python"})
+    except Exception:
+        logger.info("Number-format sample failed for %s; pandas defaults", file_path, exc_info=True)
+        return {}
+    finally:
+        if sample_path != file_path:
+            os.unlink(sample_path)
+    formato = _decidir_formato_numeros([sample.iloc[:, i] for i in range(sample.shape[1])])
+    if formato.argentino or formato.como_texto:
+        logger.info(
+            "CSV number format for %s: argentino=%s, text columns %s",
+            file_path,
+            formato.argentino,
+            [str(sample.columns[i]) for i in formato.como_texto][:10],
+        )
+    return formato.opciones_read_csv()
+
+
+def _detect_csv_dialect(file_path: str) -> dict:
     """Read first few lines to detect encoding and separator.
 
     Two-stage detection:
