@@ -200,6 +200,8 @@ def _estado_al_dia(**kw: Any) -> st.EstadoTabla:
         "canasta_basica",
         "exportaciones",
         "importaciones",
+        "monotributo",
+        "monotributo_social",
     ],
 )
 def test_las_tablas_toman_el_id_del_catalogo_del_adaptador(clave):
@@ -216,7 +218,7 @@ def test_el_etl_no_mantiene_un_catalogo_de_ids_propio():
     # Comercio en los dos. Ahora el ETL sólo dice qué clave alimenta qué tabla.
     assert not hasattr(st, "SERIES_CATALOG")
     assert all(isinstance(v, str) for v in st.SERIES_TABLAS.values())
-    assert len(st.SERIES_TABLAS) == 12
+    assert len(st.SERIES_TABLAS) == 14
 
 
 def test_una_clave_que_falta_en_el_catalogo_se_reporta_sin_romper():

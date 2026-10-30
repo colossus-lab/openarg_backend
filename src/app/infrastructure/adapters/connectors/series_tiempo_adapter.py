@@ -363,6 +363,43 @@ SERIES_CATALOG: dict[str, dict] = {
         ],
         "default_collapse": "month",
     },
+    # Para la categoría Creator Economy del hackatón de LABITCONF (29-oct): la
+    # API de Series de Tiempo trae los monotributistas del SIPA, pero sin
+    # entrada en el catálogo el agente no los encontraba seguro y el modo datos
+    # no tenía tabla.
+    "monotributo": {
+        "ids": ["151.1_IPENDIETAC_2012_M_36"],
+        "description": (
+            "Trabajadores independientes con monotributo (miles de personas, mensual, sin "
+            "estacionalidad, desde 2012; SIPA, Secretaría de Trabajo). No incluye el "
+            "monotributo social, que es otra serie."
+        ),
+        "expected_description": {
+            "151.1_IPENDIETAC_2012_M_36": "Independientes con monotributo. Sin estacionalidad."
+        },
+        "keywords": [
+            "monotributo",
+            "monotributos",
+            "monotributista",
+            "monotributistas",
+        ],
+        "generic": True,
+    },
+    "monotributo_social": {
+        "ids": ["151.1_IPENDIETAC_2012_M_43"],
+        "description": (
+            "Trabajadores independientes con monotributo social (miles de personas, mensual, "
+            "sin estacionalidad, desde 2012; SIPA, Secretaría de Trabajo)."
+        ),
+        "expected_description": {
+            "151.1_IPENDIETAC_2012_M_43": "Independientes con monotributo social. Sin estacionalidad."
+        },
+        "keywords": [
+            "monotributo social",
+            "monotributista social",
+            "monotributistas sociales",
+        ],
+    },
     "canasta_basica": {
         "ids": ["150.1_LA_POBREZA_0_D_13"],
         "description": "Canasta Básica Total (CBT) / Línea de pobreza por adulto equivalente en pesos (mensual, desde 2016)",
