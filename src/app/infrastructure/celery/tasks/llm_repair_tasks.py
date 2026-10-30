@@ -66,6 +66,10 @@ _CANDIDATES_SQL = text(
          AND t.table_type = 'BASE TABLE'
         WHERE c.table_schema = 'raw'
           AND c.column_name NOT LIKE '\_%'
+          -- `ingest_indec` rewrites these from the source every run, and its
+          -- header parser owns their names. The model renaming them is how
+          -- cuadro 1.6 ended up dated 2003-2011 (see `invented_periods`).
+          AND c.table_name NOT LIKE 'cache\_indec\_%'
     ),
     counted AS (
         SELECT table_schema, table_name,
