@@ -1014,7 +1014,14 @@ async def _ipc_months_after(ctx: ToolContext, result: DataResult) -> DataResult 
         dataset_title="Inflación mensual del INDEC — ArgentinaDatos",
         format=inflacion.format,
         records=rows,
-        metadata={**(inflacion.metadata or {}), "units": "Variación % mensual del IPC"},
+        # Con un solo mes, `data_age` no puede inferir la frecuencia por el paso
+        # entre fechas y la tomaba como diaria: «Dato atrasado … (serie diaria)»
+        # arriba de la inflación de septiembre, en staging.
+        metadata={
+            **(inflacion.metadata or {}),
+            "units": "Variación % mensual del IPC",
+            "frecuencia": "mensual",
+        },
     )
 
 

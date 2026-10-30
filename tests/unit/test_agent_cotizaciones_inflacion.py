@@ -10,6 +10,7 @@ viejo.
 from __future__ import annotations
 
 import json
+from datetime import date
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -18,6 +19,7 @@ from app.application.answers.engine import EngineRequest
 from app.application.answers.tools.base import ToolContext, ToolInputError
 from app.application.answers.tools.catalogo import BuscarDatos
 from app.application.answers.tools.conectores import BuscarSeries, Cotizaciones, SeriesTiempo
+from app.application.quality.data_age import freshness_notices
 from app.domain.entities.connectors.data_result import DataResult
 from app.domain.exceptions.connector_errors import ConnectorError
 from app.domain.exceptions.error_codes import ErrorCode
@@ -139,6 +141,17 @@ async def test_la_variacion_mensual_del_ipc_trae_septiembre_de_argentinadatos() 
         "Inflación mensual del INDEC — ArgentinaDatos",
     ]
     assert outcome.results[1].records == [{"fecha": "2026-09-30", "inflacion": 1.9}]
+    assert outcome.results[1].metadata["frecuencia"] == "mensual"
+
+
+async def test_septiembre_solo_no_sale_como_dato_atrasado_de_una_serie_diaria() -> None:
+    """Con un solo mes y sin frecuencia, el aviso de arriba decía «Dato atrasado:
+    … es de 30 de septiembre de 2026 (serie diaria)» el 30-oct, en staging."""
+    ctx, _ = _ctx_series(_inflacion(33))
+
+    outcome = await SeriesTiempo().run({"ids": [_IPC], "representacion": "percent_change"}, ctx)
+
+    assert freshness_notices([outcome.results[1]], date(2026, 10, 30), "inflación") == []
 
 
 @pytest.mark.parametrize(
