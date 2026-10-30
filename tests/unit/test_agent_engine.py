@@ -275,8 +275,8 @@ async def test_sin_datos_leidos_no_hay_fuentes_ni_exito() -> None:
 async def test_el_texto_antes_de_las_herramientas_se_borra() -> None:
     llm = ScriptedLLM(
         [
-            _turn("Voy a buscar.", calls=[_call("ubicar_lugar", texto="x")]),
-            _turn("Respuesta final."),
+            _turn("<respuesta>Voy a buscar.</respuesta>", calls=[_call("ubicar_lugar", texto="x")]),
+            _turn("<respuesta>Respuesta final.</respuesta>"),
         ]
     )
     events = await _run(AgentEngine(llm, _deps()))
@@ -286,6 +286,18 @@ async def test_el_texto_antes_de_las_herramientas_se_borra() -> None:
     ]
     assert kinds.index("ClearAnswerEvent") < kinds.index("Herramienta")
     assert events[-1].result.answer == "Respuesta final."
+
+
+async def test_el_texto_sin_marcas_antes_de_las_herramientas_no_sale() -> None:
+    llm = ScriptedLLM(
+        [
+            _turn("Voy a buscar.", calls=[_call("ubicar_lugar", texto="x")]),
+            _turn("<respuesta>Respuesta final.</respuesta>"),
+        ]
+    )
+    events = await _run(AgentEngine(llm, _deps()))
+    assert not any(isinstance(e, ClearAnswerEvent) for e in events)
+    assert "".join(e.content for e in events if isinstance(e, ChunkEvent)) == "Respuesta final."
 
 
 async def test_el_texto_sale_en_streaming_y_limpio() -> None:
@@ -312,12 +324,8 @@ async def test_el_preambulo_de_proceso_no_se_publica_ni_se_verifica(
     assert result.verification["sin_respaldo"] == []
 
 
-async def test_lo_que_ya_salio_con_el_preambulo_se_reemplaza(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """El chat web muestra lo que le llegó en streaming: el preámbulo ya
-    salió cuando se sabe que lo es. El runner reemplaza el texto, como con el
-    aviso de atraso."""
+async def _runner_events(monkeypatch: pytest.MonkeyPatch, llm: ScriptedLLM) -> list[Any]:
+    """Los eventos del chat web: el agente detrás del runner, sin caché ni analytics."""
     import contextlib
 
     from app.application.answers import runner as runner_module
@@ -335,9 +343,6 @@ async def test_lo_que_ya_salio_con_el_preambulo_se_reemplaza(
     monkeypatch.setattr(runner_module, "write_cache", _nada)
     monkeypatch.setattr(runner_module, "audit_query", lambda **kw: None)
 
-    preambulo = 'Todos los registros del padrón 2022 son "EN PADRON TS". El total es claro.'
-    answer = "El padrón registraba **110.179 usuarios**."
-    llm = ScriptedLLM([_turn(f"{preambulo}\n\n{answer}")])
     runner = EngineRunner(AgentEngine(llm, _deps()), MagicMock())
     req = EngineRequest(
         "¿Cuántos usuarios tenían tarifa social eléctrica en Mendoza en 2022?",
@@ -345,13 +350,120 @@ async def test_lo_que_ya_salio_con_el_preambulo_se_reemplaza(
         channel=CHANNEL_WS,
     )
     async with contextlib.aclosing(runner.stream(req)) as stream:
-        events = [e async for e in stream]
+        return [e async for e in stream]
+
+
+_PADRON_PREAMBULO = 'Todos los registros del padrón 2022 son "EN PADRON TS". El total es claro.'
+_PADRON = "El padrón registraba **110.179 usuarios**."
+
+
+async def test_lo_que_ya_salio_con_el_preambulo_se_reemplaza(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """El chat web muestra lo que le llegó en streaming: si el modelo narra
+    dentro de las marcas, el preámbulo ya salió cuando se sabe que lo es. El
+    runner reemplaza el texto, como con el aviso de atraso."""
+    llm = ScriptedLLM([_turn(f"<respuesta>{_PADRON_PREAMBULO}\n\n{_PADRON}</respuesta>")])
+    events = await _runner_events(monkeypatch, llm)
     streamed = "".join(e.content for e in events[:-3] if isinstance(e, ChunkEvent))
     assert "El total es claro" in streamed  # salió mientras se escribía
     kinds = [type(e).__name__ for e in events]
     assert kinds[-3:] == ["ClearAnswerEvent", "ChunkEvent", "CompleteEvent"]
-    assert events[-2].content == answer
-    assert events[-1].result.answer == answer
+    assert events[-2].content == _PADRON
+    assert events[-1].result.answer == _PADRON
+
+
+async def test_sin_marcas_no_sale_nada_hasta_el_final_y_sale_sin_preambulo(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """El respaldo: sin marcas no se sabe qué es la respuesta hasta que el
+    turno termina. No sale nada en streaming y al final sale una sola vez,
+    limpia por ``sin_monologo``: lo que el chat guarda es lo que mostró, y
+    eso vuelve a la historia del modelo. El log cuenta cuántas veces pasa."""
+    llm = ScriptedLLM([_turn(f"{_PADRON_PREAMBULO}\n\n{_PADRON}")])
+    with caplog.at_level("INFO", logger=agent_module.logger.name):
+        events = await _runner_events(monkeypatch, llm)
+    chunks = [e.content for e in events if isinstance(e, ChunkEvent)]
+    assert chunks == [_PADRON]
+    assert not any(isinstance(e, ClearAnswerEvent) for e in events)
+    assert StatusEvent("generating", "Escribiendo la respuesta…") in events
+    assert events[-1].result.answer == _PADRON
+    assert any("agent: sin marcas de respuesta" in r.getMessage() for r in caplog.records)
+
+
+async def test_con_marcas_sale_solo_lo_de_adentro(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Casos del 30-oct: el razonamiento antes de la marca y lo que siga al
+    cierre no salen ni en streaming ni en la respuesta, y no hace falta
+    reemplazar nada."""
+    pensado = (
+        "La tabla solo llega hasta q2_2011 — son exactamente 36 columnas. "
+        "El dato que necesito no está en esta tabla."
+    )
+    llm = ScriptedLLM([_turn(f"{pensado}\n<respuesta>\n{_PADRON}\n</respuesta>\nListo.")])
+    with caplog.at_level("INFO", logger=agent_module.logger.name):
+        events = await _runner_events(monkeypatch, llm)
+    streamed = "".join(e.content for e in events if isinstance(e, ChunkEvent))
+    assert streamed.strip() == _PADRON
+    assert not any(isinstance(e, ClearAnswerEvent) for e in events)
+    result = events[-1].result
+    assert result.answer == _PADRON
+    assert "respuesta>" not in result.answer
+    assert not any("sin marcas" in r.getMessage() for r in caplog.records)
+
+
+async def test_la_marca_partida_entre_fragmentos_se_reconoce() -> None:
+    """El modelo emite la marca en pedazos (``<resp`` + ``uesta>``)."""
+
+    class Partido(ScriptedLLM):
+        async def stream_turn(self, **kw: Any) -> AsyncGenerator[Any, None]:
+            turn = self.turns.pop(0)
+            for piece in ("Pienso un poco. <res", "pu", "esta>El padrón ", "registraba "):
+                yield TextDelta(piece)
+            for piece in ("**110.179 usuarios**.</resp", "uesta>", " Fin."):
+                yield TextDelta(piece)
+            yield turn
+
+    text = "Pienso un poco. <respuesta>El padrón registraba **110.179 usuarios**.</respuesta> Fin."
+    events = await _run(AgentEngine(Partido([_turn(text)]), _deps()))
+    chunks = [e.content for e in events if isinstance(e, ChunkEvent)]
+    assert "".join(chunks) == _PADRON
+    assert not any("<" in c or "Pienso" in c or "Fin" in c for c in chunks)
+    assert events[-1].result.answer == _PADRON
+
+
+@pytest.mark.parametrize(
+    ("deltas", "esperado"),
+    [
+        (["<respuesta>Hola</respuesta>"], "Hola"),
+        (["antes <", "respuesta>\n", "Hola", " <", "/", "respuesta> después"], "Hola "),
+        # Una marca que no lo es se suelta.
+        (["<respuesta>a < b", " y c</re", "sto"], "a < b y c</resto"),
+        # Cortada por largo: sin cierre sale todo lo que siguió a la apertura.
+        (["<respuesta>Las reservas", " fueron de </resp"], "Las reservas fueron de </resp"),
+        (["Sin marcas en todo el texto."], ""),
+    ],
+)
+def test_el_filtro_de_marcas(deltas: list[str], esperado: str) -> None:
+    tags = agent_module._AnswerTags()
+    out = "".join(tags.feed(d) for d in deltas) + tags.flush()
+    assert out == esperado
+    assert tags.found is bool(esperado)
+
+
+@pytest.mark.parametrize(
+    ("texto", "esperado"),
+    [
+        ("Pienso.\n<respuesta>\nHola.\n</respuesta>\nChau.", "Hola."),
+        ("<respuesta>Hola.", "Hola."),  # cortada por largo
+        ("Hola.", "Hola."),
+        ("Hola.</respuesta>", "Hola."),  # cierre suelto
+        ("Hola.\n<respuesta></respuesta>", "Hola."),  # marcas vacías: el texto
+    ],
+)
+def test_lo_que_se_publica_es_lo_marcado(texto: str, esperado: str) -> None:
+    assert agent_module._answer_of(_turn(texto))[0] == esperado
 
 
 async def test_un_error_de_herramienta_vuelve_al_modelo() -> None:
@@ -704,17 +816,21 @@ async def test_en_modo_sombra_la_respuesta_no_cambia_y_queda_registrada(
 async def test_en_modo_correct_hay_una_vuelta_correctiva(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("ANSWERS_VERIFY_MODE", "correct")
     llm = _reservas_llm(
-        "Las reservas fueron de **USD 51.191 millones** en agosto de 2026.",
-        "Las reservas fueron de **USD 49.700 millones** en agosto de 2026 (promedio mensual).",
+        "<respuesta>Las reservas fueron de **USD 51.191 millones** en agosto de 2026.</respuesta>",
+        "Reviso la serie mensual.\n<respuesta>Las reservas fueron de **USD 49.700 millones** "
+        "en agosto de 2026 (promedio mensual).</respuesta>",
     )
     events = await _run(AgentEngine(llm, _deps_series(RESERVAS_DIARIA, RESERVAS_MENSUAL)))
     result = events[-1].result
     assert result.answer.startswith("Las reservas fueron de **USD 49.700 millones**")
     assert len(llm.calls) == 3
-    # Al modelo le llegó la lista de cifras sin respaldo, después de su respuesta.
+    # Al modelo le llegó la lista de cifras sin respaldo, después de su respuesta,
+    # y el pedido de volver a marcarla.
     pedido = llm.calls[2]["messages"][-1]["content"]
     assert "51.191 millones" in pedido
+    assert "<respuesta> y </respuesta>" in pedido
     assert llm.calls[2]["messages"][-2]["role"] == "assistant"
+    assert "Reviso" not in "".join(e.content for e in events if isinstance(e, ChunkEvent))
     # Lo que ya había salido en streaming se borró antes de la respuesta nueva.
     kinds = [type(e).__name__ for e in events]
     first_clear = kinds.index("ClearAnswerEvent")
@@ -724,6 +840,25 @@ async def test_en_modo_correct_hay_una_vuelta_correctiva(monkeypatch: pytest.Mon
     assert result.verification["vuelta_correctiva"] is True
     assert result.verification["sin_respaldo"] == []
     assert result.verification["sin_respaldo_antes"] == ["51.191 millones"]
+
+
+async def test_la_vuelta_correctiva_sin_marcas_no_muestra_la_primera_respuesta(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Sin marcas no sale nada hasta que se sabe cuál es la respuesta: la que
+    se corrige nunca llega a la pantalla y no hay nada que borrar."""
+    monkeypatch.setenv("ANSWERS_VERIFY_MODE", "correct")
+    corregida = (
+        "Las reservas fueron de **USD 49.700 millones** en agosto de 2026 (promedio mensual)."
+    )
+    llm = _reservas_llm(
+        "Las reservas fueron de **USD 51.191 millones** en agosto de 2026.", corregida
+    )
+    events = await _run(AgentEngine(llm, _deps_series(RESERVAS_DIARIA, RESERVAS_MENSUAL)))
+    assert len(llm.calls) == 3
+    assert not any(isinstance(e, ClearAnswerEvent) for e in events)
+    assert [e.content for e in events if isinstance(e, ChunkEvent)] == [corregida]
+    assert events[-1].result.answer == corregida
 
 
 async def test_si_sigue_sin_respaldo_va_un_aviso_arriba_y_la_cifra_queda(

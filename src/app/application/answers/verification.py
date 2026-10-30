@@ -1245,7 +1245,8 @@ def correction_note(unsupported: Sequence[Figure]) -> str:
         "respuesta completa: sacá esas cifras, o calculalas con una herramienta (por ejemplo "
         "series_tiempo con `representacion`, o calcular) y usá lo que devuelva. No hagas "
         "cuentas de cabeza y no sumes ni restes tasas. Si alguna sí sale de los resultados, "
-        "escribila tal como figura ahí. No menciones esta revisión."
+        "escribila tal como figura ahí. No menciones esta revisión. La respuesta nueva va "
+        "entera entre <respuesta> y </respuesta>, que es lo único que se publica."
     )
 
 

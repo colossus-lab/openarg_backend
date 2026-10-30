@@ -697,3 +697,22 @@ def test_el_prompt_no_tiene_llaves_sueltas_del_formato() -> None:
     """El texto pasa por ``str.format``: una llave sin escapar lo rompería."""
     prompt = system_prompt(date(2026, 10, 4), tool_names={BCRA_TOOL})
     assert "{" not in prompt and "}" not in prompt
+
+
+def test_la_respuesta_va_entre_marcas_en_cada_pedido() -> None:
+    """30-oct: «sin contar tu proceso» no alcanzaba y el modelo publicaba su
+    razonamiento («Los datos ya los tengo de la consulta anterior… Debo
+    revisar mejor la unidad.»). Se publica sólo lo que va entre las marcas, y
+    lo piden el formato, la última vuelta sin herramientas (donde más se
+    narra) y la vuelta correctiva, con las mismas marcas que lee el motor."""
+    from app.application.answers.prompt import ANSWER_CLOSE, ANSWER_OPEN, FINAL_ROUND_NOTE
+    from app.application.answers.verification import correction_note, extract_figures
+
+    marcas = f"entre {ANSWER_OPEN} y {ANSWER_CLOSE}"
+    prompt = system_prompt(date(2026, 10, 30), tool_names={BCRA_TOOL})
+    # En la regla del formato, que es la última.
+    assert marcas in _regla_del_orden(prompt)
+    assert "lo único que se publica" in _regla_del_orden(prompt)
+    assert marcas in FINAL_ROUND_NOTE
+    [fig] = extract_figures("Las reservas fueron de USD 51.191 millones.")
+    assert marcas in correction_note([fig])

@@ -10,8 +10,10 @@ Cada turno:
    anteriores, si hay) y las herramientas;
 2. pide herramientas; se ejecutan en paralelo y cada una avisa al usuario qué
    está haciendo (``status``);
-3. con los resultados a la vista vuelve a pedir o contesta. El texto final
-   sale en streaming (``chunk``), limpio de nombres internos;
+3. con los resultados a la vista vuelve a pedir o contesta. La respuesta va
+   entre ``<respuesta>`` y ``</respuesta>`` y sólo eso sale en streaming
+   (``chunk``), limpio de nombres internos; lo que el modelo escribe fuera
+   de las marcas no se publica;
 4. si se agota el presupuesto (vueltas o tiempo), se le pide la respuesta con
    lo que tiene;
 5. cada cifra de la respuesta se busca en lo que devolvieron las herramientas
@@ -68,7 +70,13 @@ from app.application.answers.engine import (
 from app.application.answers.monologo import sin_monologo
 from app.application.answers.neutrality import scan_causal
 from app.application.answers.pricing import cost_usd
-from app.application.answers.prompt import FINAL_ROUND_NOTE, system_prompt, user_message
+from app.application.answers.prompt import (
+    ANSWER_CLOSE,
+    ANSWER_OPEN,
+    FINAL_ROUND_NOTE,
+    system_prompt,
+    user_message,
+)
 from app.application.answers.tools import build_tools
 from app.application.answers.tools.base import (
     AgentToolImpl,
@@ -199,6 +207,68 @@ class _ChunkCleaner:
         return _scrub_internal_identifiers(ready) if ready else ""
 
 
+def _held(buf: str, tag: str) -> int:
+    """Cuántos caracteres del final de ``buf`` pueden ser el comienzo de ``tag``."""
+    for n in range(min(len(buf), len(tag) - 1), 0, -1):
+        if tag.startswith(buf[-n:]):
+            return n
+    return 0
+
+
+class _AnswerTags:
+    """En streaming deja pasar sólo lo que va entre las marcas de respuesta.
+
+    Hasta ``<respuesta>`` no emite nada: es lo que el modelo piensa en voz
+    alta («Los datos ya los tengo de la consulta anterior…», 30-oct). Una
+    marca partida entre fragmentos (``<resp`` + ``uesta>``) se retiene hasta
+    saber si lo es. En ``</respuesta>`` corta y descarta lo que venga
+    después. Sin cierre (cortada por largo) sale todo lo que siguió a la
+    apertura. ``found`` dice si hubo apertura: sin ella no salió nada y el
+    texto lo manda ``stream`` al final (ver ahí).
+    """
+
+    def __init__(self) -> None:
+        self._buf = ""
+        self._state = "antes"
+        self._emitted = False
+
+    @property
+    def found(self) -> bool:
+        return self._state != "antes"
+
+    def feed(self, text: str) -> str:
+        if self._state == "despues":
+            return ""
+        self._buf += text
+        if self._state == "antes":
+            i = self._buf.find(ANSWER_OPEN)
+            if i < 0:
+                keep = _held(self._buf, ANSWER_OPEN)
+                self._buf = self._buf[len(self._buf) - keep :]
+                return ""
+            self._buf = self._buf[i + len(ANSWER_OPEN) :]
+            self._state = "dentro"
+        j = self._buf.find(ANSWER_CLOSE)
+        if j >= 0:
+            ready, self._buf = self._buf[:j], ""
+            self._state = "despues"
+        else:
+            cut = len(self._buf) - _held(self._buf, ANSWER_CLOSE)
+            ready, self._buf = self._buf[:cut], self._buf[cut:]
+        return self._emit(ready)
+
+    def flush(self) -> str:
+        ready, self._buf = self._buf, ""
+        return self._emit(ready) if self._state == "dentro" else ""
+
+    def _emit(self, text: str) -> str:
+        # El salto de línea después de la apertura no es parte de la respuesta.
+        if not self._emitted:
+            text = text.lstrip()
+            self._emitted = bool(text)
+        return text
+
+
 def _source(result: DataResult) -> dict[str, Any]:
     return {
         "name": result.dataset_title,
@@ -318,6 +388,7 @@ class AgentEngine:
             if out_of_budget:
                 messages.append({"role": "user", "content": FINAL_ROUND_NOTE})
 
+            tags = _AnswerTags()
             cleaner = _ChunkCleaner()
             streamed = False
             turn: AgentTurn | None = None
@@ -330,7 +401,7 @@ class AgentEngine:
                 allow_tools=not out_of_budget,
             ):
                 if isinstance(item, TextDelta):
-                    text = cleaner.feed(item.text)
+                    text = cleaner.feed(tags.feed(item.text))
                     if text:
                         # Un espacio suelto antes de pedir herramientas no es
                         # el comienzo de la respuesta.
@@ -345,7 +416,15 @@ class AgentEngine:
             usage.add(turn.usage)
 
             if not turn.tool_calls or out_of_budget or turn.stop_reason != "tool_use":
-                tail = cleaner.flush()
+                tail = cleaner.feed(tags.flush()) + cleaner.flush()
+                if not tags.found and turn.stop_reason != "refusal":
+                    # Cuántas veces el respaldo (``sin_monologo``) es lo único
+                    # que separa el razonamiento de la respuesta.
+                    logger.info(
+                        "agent: sin marcas de respuesta (stop=%s, vuelta_correctiva=%s)",
+                        turn.stop_reason,
+                        first_check is not None,
+                    )
                 if tail:
                     streamed = streamed or bool(tail.strip())
                     yield ChunkEvent(tail)
@@ -439,20 +518,28 @@ class AgentEngine:
                     text, evidence, evidence_seen, context_seen
                 )
 
-        yield CompleteEvent(
-            self._result(
-                final,
-                evidence,
-                usage,
-                req,
-                evidence_seen,
-                mode,
-                first_check,
-                context_seen,
-                check=final_check,
-                verify_ms=verify_ms,
-            )
+        result = self._result(
+            final,
+            evidence,
+            usage,
+            req,
+            evidence_seen,
+            mode,
+            first_check,
+            context_seen,
+            check=final_check,
+            verify_ms=verify_ms,
         )
+        # Sin marcas no salió nada en streaming, y el runner sólo reemplaza
+        # lo que ya se mostró: la respuesta va entera acá, ya sin el
+        # monólogo (``sin_monologo``). El chat la guarda tal como la mostró y
+        # eso vuelve a la historia del modelo en el turno siguiente.
+        if not streamed:
+            from app.application.pipeline.nodes.analyst import _scrub_internal_identifiers
+
+            yield StatusEvent(STEP_WRITING, WRITING_TEXT)
+            yield ChunkEvent(_scrub_internal_identifiers(result.answer))
+        yield CompleteEvent(result)
 
     def _result(
         self,
@@ -559,16 +646,32 @@ class AgentEngine:
 def _answer_of(turn: AgentTurn) -> tuple[str, list[str]]:
     """El texto de la respuesta (el que se verifica y se entrega) y sus avisos.
 
-    Sin el preámbulo en que el modelo cuenta su proceso ni nombres de
-    herramientas (``monologo``, H063). Lo que ya salió en streaming lo
-    reemplaza el runner, porque el texto final es otro.
+    Lo que va entre ``<respuesta>`` y ``</respuesta>``, como en streaming
+    (``_AnswerTags``): la primera apertura, hasta el cierre o hasta el final
+    si se cortó por largo. Sin marcas, el texto entero. En los dos casos, sin
+    el preámbulo en que el modelo cuenta su proceso ni nombres de
+    herramientas (``monologo``, H063), y sin marcas sueltas. Lo que ya salió
+    en streaming lo reemplaza el runner si el texto final es otro.
     """
     if turn.stop_reason == "refusal":
         return _REFUSAL, []
     warnings: list[str] = []
     if turn.stop_reason == "max_tokens":
         warnings.append("La respuesta se cortó por largo; puede estar incompleta.")
-    return sin_monologo(turn.text.strip()) or _NO_ANSWER, warnings
+    return sin_monologo(_marked(turn.text)) or _NO_ANSWER, warnings
+
+
+_ANSWER_TAG = re.compile(rf"{re.escape(ANSWER_OPEN)}|{re.escape(ANSWER_CLOSE)}")
+
+
+def _marked(text: str) -> str:
+    """Lo que va entre las marcas de respuesta; sin apertura, el texto sin marcas."""
+    _, opened, inside = text.partition(ANSWER_OPEN)
+    if opened:
+        inside = inside.partition(ANSWER_CLOSE)[0]
+        if inside.strip():
+            return _ANSWER_TAG.sub("", inside).strip()
+    return _ANSWER_TAG.sub("", text).strip()
 
 
 def _safe_verify(
