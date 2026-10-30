@@ -1,0 +1,11 @@
+# Cada hora: un día con varios deploys suma ~9 GB por deploy.
+[Unit]
+Description=OpenArg: limpieza de imágenes de rollback cada hora
+
+[Timer]
+OnCalendar=hourly
+RandomizedDelaySec=5m
+Persistent=true
+
+[Install]
+WantedBy=timers.target

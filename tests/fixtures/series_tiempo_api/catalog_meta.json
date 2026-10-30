@@ -147,6 +147,28 @@
    "dataset_title": "Valores de la Canasta Básica de Alimentos  y Canasta Básica Total.",
    "dataset_source": "Instituto Nacional de Estadística y Censos (INDEC)"
   },
+  "151.1_IPENDIETAC_2012_M_36": {
+   "description": "Independientes con monotributo. Sin estacionalidad.",
+   "units": "Miles de Personas",
+   "frequency": "R/P1M",
+   "time_index_start": "2012-01-01",
+   "time_index_end": "2026-06-01",
+   "is_updated": "False",
+   "dataset_title": "Trabajadores registrados según modalidad ocupacional principal. Base 2012",
+   "dataset_source": "Secretaría de Trabajo, Empleo y Seguridad Social, Ministerio de Capital Humano",
+   "recorded_at": "2026-10-29"
+  },
+  "151.1_IPENDIETAC_2012_M_43": {
+   "description": "Independientes con monotributo social. Sin estacionalidad.",
+   "units": "Miles de Personas",
+   "frequency": "R/P1M",
+   "time_index_start": "2012-01-01",
+   "time_index_end": "2026-06-01",
+   "is_updated": "False",
+   "dataset_title": "Trabajadores registrados según modalidad ocupacional principal. Base 2012",
+   "dataset_source": "Secretaría de Trabajo, Empleo y Seguridad Social, Ministerio de Capital Humano",
+   "recorded_at": "2026-10-29"
+  },
   "174.1_RRVAS_IDOS_0_0_36": {
    "description": "Reservas Internacionales BCRA Saldos",
    "units": "Millones de dólares",

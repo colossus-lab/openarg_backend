@@ -1,0 +1,10 @@
+# Ver scripts/servidor/limpiar_rollbacks.sh. Se instala en /etc/systemd/system/
+# junto con el .timer (docs/deploy-produccion.md § Limpieza de imágenes).
+[Unit]
+Description=OpenArg: deja sólo los 2 últimos juegos de imágenes de rollback
+After=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/openarg-limpiar-rollbacks
+TimeoutSec=15m

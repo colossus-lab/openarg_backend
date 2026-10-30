@@ -397,7 +397,9 @@ class BuscarSeries:
             "dice series_tiempo). Después pedí los datos con series_tiempo. Elegí la serie que "
             "mide exactamente lo pedido y, entre dos que miden "
             "lo mismo, la que llega más lejos: el EMAE no es el PBI, y la línea de pobreza "
-            "(valor de la canasta) no es la tasa de pobreza."
+            "(valor de la canasta) no es la tasa de pobreza. Si el IPC de series_tiempo no "
+            "llega al último mes que el INDEC ya publicó, ese mes lo trae "
+            "cotizaciones(indicador='inflacion')."
         ),
         input_schema={
             "type": "object",
@@ -579,7 +581,22 @@ class SeriesTiempo:
         )
         if complete:
             payload["periodos"] = complete
-        return ToolOutcome(to_json(payload), results=[result])
+        results = [result]
+        if (
+            ids == [_IPC_NACIONAL]
+            and representation == "percent_change"
+            and frequency in (None, "month")
+            and not kwargs["end_date"]
+        ):
+            posteriores = await _ipc_months_after(ctx, result)
+            if posteriores is not None:
+                payload["meses_posteriores"] = {
+                    "fuente": posteriores.dataset_title,
+                    "filas": posteriores.records,
+                    "nota": _IPC_MONTHS_AFTER_NOTE,
+                }
+                results.append(posteriores)
+        return ToolOutcome(to_json(payload), results=results)
 
     async def _variation(
         self,
@@ -961,6 +978,53 @@ def _complete_period_sentences(
     return text
 
 
+# El IPC nacional de la API de Series de Tiempo se atrasa respecto del INDEC:
+# el 29-oct seguía en agosto con septiembre (1,9 %) publicado desde mediados de
+# octubre. Con sólo la pista en `cotizaciones`, en staging el agente igual
+# contestó «los últimos 12 meses» hasta agosto y el fact-check de septiembre
+# con septiembre de 2025, diciendo que el de 2026 «aún no está publicado». Por
+# eso la variación mensual del IPC trae sola los meses que faltan.
+_IPC_NACIONAL = "148.3_INIVELNAL_DICI_M_26"
+_IPC_MONTHS_AFTER_NOTE = (
+    "La API de Series de Tiempo todavía no tiene estos meses y el INDEC ya los publicó: "
+    "son la variación % mensual del mismo IPC nacional, según ArgentinaDatos. Incluilos "
+    "como los últimos meses y citá ArgentinaDatos con dato del INDEC."
+)
+
+
+async def _ipc_months_after(ctx: ToolContext, result: DataResult) -> DataResult | None:
+    """La inflación mensual de ArgentinaDatos posterior al último mes de la serie."""
+    conn = getattr(ctx.deps, "arg_datos", None)
+    if conn is None:
+        return None
+    last = str(result.records[-1].get("fecha", ""))[:7]
+    try:
+        inflacion = await conn.fetch_inflacion()
+    except ConnectorError:
+        return None
+    if inflacion is None or not last:
+        return None
+    rows = [r for r in inflacion.records or [] if str(r.get("fecha", ""))[:7] > last]
+    if not rows:
+        return None
+    return DataResult(
+        source=inflacion.source,
+        portal_name=inflacion.portal_name,
+        portal_url=inflacion.portal_url,
+        dataset_title="Inflación mensual del INDEC — ArgentinaDatos",
+        format=inflacion.format,
+        records=rows,
+        # Con un solo mes, `data_age` no puede inferir la frecuencia por el paso
+        # entre fechas y la tomaba como diaria: «Dato atrasado … (serie diaria)»
+        # arriba de la inflación de septiembre, en staging.
+        metadata={
+            **(inflacion.metadata or {}),
+            "units": "Variación % mensual del IPC",
+            "frecuencia": "mensual",
+        },
+    )
+
+
 def _missing_series_note(missing: list[str]) -> str:
     names = ", ".join(f"`{s}`" for s in missing)
     return (
@@ -1012,6 +1076,8 @@ class Cotizaciones:
     def describe(self, args: dict[str, Any]) -> str:
         if args.get("indicador") == "riesgo_pais":
             return "Consultando el riesgo país"
+        if args.get("indicador") == "inflacion":
+            return "Consultando la inflación mensual en ArgentinaDatos"
         casa = str(args.get("casa") or "").strip()
         return f"Consultando la cotización del dólar {casa}".rstrip()
 
@@ -1024,12 +1090,15 @@ class Cotizaciones:
             "riesgo país. Para el dólar oficial usá variables_bcra (minorista y mayorista de "
             "referencia del BCRA); si sumás la pizarra del Banco Nación, nombrala así y "
             "aclarala como no oficial. `solo_actual=true` trae el último valor; si no, la "
-            "historia."
+            "historia. `indicador=inflacion` trae la variación % mensual del IPC del INDEC "
+            "tal como la replica ArgentinaDatos: usala sólo cuando series_tiempo no llega al "
+            "último mes que el INDEC ya publicó (el IPC sale a mediados del mes siguiente), "
+            "para ese mes, y citala como ArgentinaDatos con dato del INDEC."
         ),
         input_schema={
             "type": "object",
             "properties": {
-                "indicador": {"type": "string", "enum": ["dolar", "riesgo_pais"]},
+                "indicador": {"type": "string", "enum": ["dolar", "riesgo_pais", "inflacion"]},
                 "casa": {"type": "string", "enum": list(_CASAS)},
                 "solo_actual": {"type": "boolean"},
             },
@@ -1048,8 +1117,12 @@ class Cotizaciones:
             result = await conn.fetch_dolar(casa=casa, ultimo=current)
         elif indicador == "riesgo_pais":
             result = await conn.fetch_riesgo_pais(ultimo=current)
+        elif indicador == "inflacion":
+            # La API devuelve toda la historia; `solo_actual` no la recorta acá
+            # porque para completar un mes faltante hacen falta los de antes.
+            result = await conn.fetch_inflacion()
         else:
-            raise ToolInputError("`indicador` es 'dolar' o 'riesgo_pais'.")
+            raise ToolInputError("`indicador` es 'dolar', 'riesgo_pais' o 'inflacion'.")
         if result is None or not result.records:
             return ToolOutcome(to_json({"filas": [], "nota": "Sin datos."}))
         return ToolOutcome(to_json(_tail_for_model(result, 30)), results=[result])

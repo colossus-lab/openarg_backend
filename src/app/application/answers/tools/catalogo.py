@@ -294,7 +294,14 @@ class BuscarDatos:
             "(`mart.*`, preferilas: ya están revisadas y normalizadas) y datasets publicados con "
             "sus tablas consultables y cantidad de filas. No devuelve datos: después hay que "
             "llamar a describir_tabla. Para indicadores macro oficiales (inflación, PBI, EMAE, "
-            "desempleo, reservas, tipo de cambio) usá primero series_tiempo."
+            "desempleo, reservas, tipo de cambio) usá primero series_tiempo. El presupuesto "
+            "nacional tiene una tabla por ejercicio, `raw.cache_presupuesto_credito_<año>`: "
+            "crédito vigente, comprometido, devengado (lo ejecutado) y pagado, en millones de "
+            "pesos, por jurisdicción, función (`funcion_desc`, p. ej. «Educación y Cultura») y "
+            "programa (`programa_desc`, p. ej. «Desarrollo de la Educacion Superior», así, sin "
+            "tilde, para las universidades). «Este año» o una ejecución sin año es el ejercicio del año de hoy; "
+            "el «Transversal financiero» es otro clasificador, no la ejecución. Los totales y "
+            "los rankings se sacan con calcular."
         ),
         input_schema={
             "type": "object",
