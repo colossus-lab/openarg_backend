@@ -433,6 +433,13 @@ def staleness_warning(engine: Engine, served: str | None) -> str | None:
 # it ~50 days after the month), so "two periods" would have flagged it. The
 # daily reserves series, 34 days behind, is flagged by any margin.
 #
+# Trimestral: the INDEC publishes each quarter's EPH and GDP about 80 days after
+# it ends (mid-December for the third quarter), so right before a release the
+# latest quarter is ~170 days past its end. With 120 the EPH of the second
+# quarter of 2026 was flagged from 29-oct, the day of the LABITCONF hackathon,
+# on every unemployment answer. 180 matches `MAX_ATRASO_DIAS` in
+# `tests/evaluation/oracles.py`.
+#
 # Semestral: the INDEC publishes each semester's poverty about 90 days after it
 # ends (late March and late September), so right before a release the latest
 # semester is ~275 days past its end. With 270 it was flagged for the last days
@@ -443,7 +450,7 @@ FRESHNESS_MARGIN_DAYS: dict[str, int] = {
     "diaria": 7,
     "semanal": 21,
     "mensual": 75,
-    "trimestral": 120,
+    "trimestral": 180,
     "semestral": 300,
     "anual": 550,
 }
