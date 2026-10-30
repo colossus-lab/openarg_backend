@@ -2,8 +2,8 @@
 
 La metadata (``field.description``) de cada id se grabó de la API el
 04-oct-2026 en ``tests/fixtures/series_tiempo_api/catalog_meta.json``; la del
-IPIM y del IPC por región, el 06-oct, y la de la tasa de actividad y el PIB,
-el 07-oct (``recorded_at`` de cada una).
+IPIM y del IPC por región, el 06-oct, la de la tasa de actividad y el PIB, el 07-oct, y
+la del monotributo, el 29-oct (``recorded_at`` de cada una).
 Cambiar un id del catálogo obliga a regrabarla y a fijar su descripción: así
 se coló ``11.3_AGCS_2004_M_41`` (EMAE comercio) rotulado como "actividad
 industrial", y el agente lo recibía como serie verificada.
@@ -74,6 +74,8 @@ def test_un_id_cambiado_se_detecta() -> None:
         ("ipc_patagonia", "Patagonia"),
         ("actividad", "Tasa de actividad"),
         ("pbi", "PIB"),
+        ("monotributo", "monotributo"),
+        ("monotributo_social", "monotributo social"),
     ],
 )
 def test_la_serie_de_cada_tema_es_de_ese_tema(key: str, palabra: str) -> None:
@@ -305,3 +307,18 @@ def test_la_serie_nacional_avisa_que_no_es_la_de_un_lugar_ni_un_cociente(
     assert "total nacional" in descripcion
     assert aviso in descripcion
     assert "usá la de 'series' que mida eso" in descripcion
+
+
+@pytest.mark.parametrize(
+    ("texto", "claves"),
+    [
+        ("¿cuántos monotributistas hay?", ["monotributo"]),
+        ("evolución del monotributo en 2025", ["monotributo"]),
+        ("¿cuántos monotributistas sociales hay?", ["monotributo_social"]),
+        ("monotributo social por mes", ["monotributo_social"]),
+    ],
+)
+def test_el_monotributo_social_no_trae_tambien_el_monotributo(
+    texto: str, claves: list[str]
+) -> None:
+    assert _claves(texto) == claves

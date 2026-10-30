@@ -109,6 +109,8 @@ SERIES_TABLAS: dict[str, str] = {
     "exportaciones": "exportaciones",
     "importaciones": "importaciones",
     "actividad_industrial": "actividad_industrial",
+    "monotributo": "monotributo",
+    "monotributo_social": "monotributo_social",
 }
 
 # Los cambios de id que una persona aprobó, como (tabla, id viejo, id nuevo).

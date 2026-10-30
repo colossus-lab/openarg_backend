@@ -397,7 +397,9 @@ class BuscarSeries:
             "dice series_tiempo). Después pedí los datos con series_tiempo. Elegí la serie que "
             "mide exactamente lo pedido y, entre dos que miden "
             "lo mismo, la que llega más lejos: el EMAE no es el PBI, y la línea de pobreza "
-            "(valor de la canasta) no es la tasa de pobreza."
+            "(valor de la canasta) no es la tasa de pobreza. Si el IPC de series_tiempo no "
+            "llega al último mes que el INDEC ya publicó, ese mes lo trae "
+            "cotizaciones(indicador='inflacion')."
         ),
         input_schema={
             "type": "object",
@@ -1012,6 +1014,8 @@ class Cotizaciones:
     def describe(self, args: dict[str, Any]) -> str:
         if args.get("indicador") == "riesgo_pais":
             return "Consultando el riesgo país"
+        if args.get("indicador") == "inflacion":
+            return "Consultando la inflación mensual en ArgentinaDatos"
         casa = str(args.get("casa") or "").strip()
         return f"Consultando la cotización del dólar {casa}".rstrip()
 
@@ -1024,12 +1028,15 @@ class Cotizaciones:
             "riesgo país. Para el dólar oficial usá variables_bcra (minorista y mayorista de "
             "referencia del BCRA); si sumás la pizarra del Banco Nación, nombrala así y "
             "aclarala como no oficial. `solo_actual=true` trae el último valor; si no, la "
-            "historia."
+            "historia. `indicador=inflacion` trae la variación % mensual del IPC del INDEC "
+            "tal como la replica ArgentinaDatos: usala sólo cuando series_tiempo no llega al "
+            "último mes que el INDEC ya publicó (el IPC sale a mediados del mes siguiente), "
+            "para ese mes, y citala como ArgentinaDatos con dato del INDEC."
         ),
         input_schema={
             "type": "object",
             "properties": {
-                "indicador": {"type": "string", "enum": ["dolar", "riesgo_pais"]},
+                "indicador": {"type": "string", "enum": ["dolar", "riesgo_pais", "inflacion"]},
                 "casa": {"type": "string", "enum": list(_CASAS)},
                 "solo_actual": {"type": "boolean"},
             },
@@ -1048,8 +1055,12 @@ class Cotizaciones:
             result = await conn.fetch_dolar(casa=casa, ultimo=current)
         elif indicador == "riesgo_pais":
             result = await conn.fetch_riesgo_pais(ultimo=current)
+        elif indicador == "inflacion":
+            # La API devuelve toda la historia; `solo_actual` no la recorta acá
+            # porque para completar un mes faltante hacen falta los de antes.
+            result = await conn.fetch_inflacion()
         else:
-            raise ToolInputError("`indicador` es 'dolar' o 'riesgo_pais'.")
+            raise ToolInputError("`indicador` es 'dolar', 'riesgo_pais' o 'inflacion'.")
         if result is None or not result.records:
             return ToolOutcome(to_json({"filas": [], "nota": "Sin datos."}))
         return ToolOutcome(to_json(_tail_for_model(result, 30)), results=[result])
