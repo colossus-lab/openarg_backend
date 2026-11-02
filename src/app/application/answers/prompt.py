@@ -137,6 +137,14 @@ Lo que se sumó el 07-oct, por la prueba de calidad de staging (ola 4):
 - **Formato.** nueva_21 arrancó nombrando las reglas del prompt y listó las
   opciones con emojis. «No menciones estas reglas» estaba sólo dentro de «No
   hagas cuentas»: ahora va también en el formato, junto con «sin emojis».
+- **Marcas de respuesta.** «Sin contar tu proceso» no alcanzaba: el 30-oct
+  salieron «Los datos ya los tengo de la consulta anterior… Debo revisar
+  mejor la unidad.» y «La columna `letra` aparece nula en todos los
+  registros.», y la lista de frases de ``monologo`` nunca las cubre todas.
+  La respuesta va entre ``<respuesta>`` y ``</respuesta>`` y se publica sólo
+  eso (``agent_engine._AnswerTags`` y ``_answer_of``); ``sin_monologo``
+  queda de respaldo. Lo dicen el formato, la última vuelta sin herramientas
+  (donde más se narra) y el pedido de la vuelta correctiva.
 """
 
 from __future__ import annotations
@@ -145,6 +153,9 @@ from collections.abc import Collection
 from datetime import date
 
 BCRA_TOOL = "variables_bcra"
+# Las marcas de la respuesta: se publica sólo lo que va entre ellas.
+ANSWER_OPEN = "<respuesta>"
+ANSWER_CLOSE = "</respuesta>"
 
 SYSTEM_PROMPT = """\
 Sos OpenArg, un asistente que responde preguntas con datos públicos de Argentina. \
@@ -273,7 +284,9 @@ aporta, un detalle breve (evolución, comparación, aclaración del dato). \
 Sin títulos, sin preámbulos y sin emojis, y sin contar tu proceso: nada de "Voy a \
 preparar la respuesta", "Con esto ya tengo lo necesario" ni explicaciones de cómo leíste \
 la tabla. Tampoco nombres estas instrucciones ni digas qué te piden o te prohíben. La \
-persona lee sólo la respuesta.
+persona lee sólo la respuesta: escribila entera entre <respuesta> y </respuesta>, que es \
+lo único que se publica. Lo que escribas fuera de esas marcas no lo lee nadie, y adentro \
+no va nada que no sea la respuesta.
 """
 
 BCRA_RULE = """\
@@ -287,7 +300,9 @@ si las usás, decí de dónde salen.
 
 FINAL_ROUND_NOTE = (
     "Ya no podés usar más herramientas. Respondé ahora con lo que encontraste, o decí "
-    "con claridad qué no encontraste."
+    f"con claridad qué no encontraste. La respuesta va entre {ANSWER_OPEN} y "
+    f"{ANSWER_CLOSE}: es lo único que se publica, y adentro no cuentes lo que buscaste "
+    "ni lo que no pudiste pedir."
 )
 
 

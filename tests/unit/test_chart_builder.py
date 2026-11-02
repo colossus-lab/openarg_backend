@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from app.application.pipeline.chart_builder import (
     adopt_llm_titles,
     build_deterministic_charts,
@@ -101,6 +103,23 @@ class TestBuildDeterministicCharts:
         )
         charts = _build_deterministic_charts([result])
         assert charts == []
+
+    @pytest.mark.parametrize("eje", ["periodo", "año"])
+    def test_un_eje_que_se_repite_son_varias_series_y_no_se_une_en_una(self, eje):
+        # `mart.pobreza_indec_aglomerados`: pobreza e indigencia de hogares y personas.
+        filas = [
+            {"indicador": "Hogares", eje: "1er. semestre 2026", "valor": 24.4},
+            {"indicador": "Personas", eje: "1er. semestre 2026", "valor": 32.3},
+            {"indicador": "Hogares", eje: "1er. semestre 2026", "valor": 5.6},
+            {"indicador": "Personas", eje: "1er. semestre 2026", "valor": 7.5},
+        ]
+        assert _build_deterministic_charts([_make_result(filas)]) == []
+
+    def test_un_ranking_puede_repetir_el_nombre(self):
+        # Dos personas con el mismo nombre no son un eje temporal.
+        filas = [{"nombre": "Ana", "total": 3}, {"nombre": "Ana", "total": 2}]
+        charts = _build_deterministic_charts([_make_result(filas, format="json")])
+        assert [c["type"] for c in charts] == ["bar_chart"]
 
 
 def _bcra_daily(days: int = 200) -> list[dict]:

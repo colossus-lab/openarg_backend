@@ -184,7 +184,7 @@ async def resolve(sandbox: Any, requested: str) -> ResolvedTable:
             name=mart.table_name,
             title=_mart_title(mart),
             portal=_MART_PORTAL,
-            url="",
+            url=mart.source_url,
             row_count=mart.row_count,
             mart=mart,
         )

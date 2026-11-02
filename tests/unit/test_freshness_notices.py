@@ -63,6 +63,24 @@ def test_atraso_por_frecuencia(
     assert observation_staleness(last, freq, HOY, updated_at_source=updated).stale is stale
 
 
+@pytest.mark.parametrize(
+    ("hoy", "stale"),
+    [
+        # Hackatón LABITCONF: 122 días después del 30-jun y el 3.º trimestre
+        # todavía no salió (el INDEC lo publica a mediados de diciembre).
+        (date(2026, 10, 30), False),
+        # Justo antes de esa publicación, ~170 días.
+        (date(2026, 12, 15), False),
+        # Pasado enero sin el 3.º trimestre, la fuente sí está atrasada.
+        (date(2027, 1, 15), True),
+    ],
+)
+def test_la_eph_del_segundo_trimestre_no_se_atrasa_antes_de_la_publicacion_siguiente(
+    hoy: date, stale: bool
+) -> None:
+    assert observation_staleness(date(2026, 4, 1), "trimestral", hoy).stale is stale
+
+
 def test_la_serie_truncada_de_reservas_lleva_aviso_arriba() -> None:
     """La respuesta falsa de la reproducción: «abril de 2023: USD 35.001 M»."""
     [aviso] = freshness_notices(

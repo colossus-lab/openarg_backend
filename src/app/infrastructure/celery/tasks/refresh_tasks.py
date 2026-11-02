@@ -36,6 +36,7 @@ from typing import Any
 
 from sqlalchemy import text
 
+from app.application.catalog.carga_propia import sql_sin_carga_propia
 from app.application.collection.freshness import backstop_age, enabled_portals, is_enabled
 from app.infrastructure.celery.app import celery_app
 from app.infrastructure.celery.tasks._db import get_sync_engine
@@ -50,7 +51,7 @@ logger = logging.getLogger(__name__)
 # merely got old is a precaution. Evidence goes first, so a bounded run spends
 # its budget on the 3,431 known-stale before the 25,580 that have not moved.
 _CANDIDATES_SQL = text(
-    """
+    f"""
     SELECT d.id AS dataset_id,
            d.portal,
            d.source_id,
@@ -62,6 +63,7 @@ _CANDIDATES_SQL = text(
     WHERE cd.status = 'ready'
       AND cd.updated_at IS NOT NULL
       AND d.portal = ANY(:portals)
+      {sql_sin_carga_propia("d")}
       AND (
           d.last_updated_at > cd.updated_at
           OR cd.updated_at < NOW() - make_interval(days => :backstop_days)

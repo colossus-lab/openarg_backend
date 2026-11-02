@@ -33,6 +33,7 @@ from celery.signals import worker_process_init
 from sqlalchemy import text
 from sqlalchemy.exc import DataError, DBAPIError
 
+from app.application.catalog.carga_propia import sql_sin_carga_propia, tiene_carga_propia
 from app.application.catalog.physical_namer import RawPhysicalName, RawPhysicalNamer
 from app.application.ddjj.reemplazos import es_reemplazado, sql_sin_reemplazados
 from app.application.expander import MultiFileExpander
@@ -41,6 +42,15 @@ from app.application.pipeline.parsers import (
     promote_buried_headers,
     time_column_ratio,
     unpivot_if_time_pivoted,
+)
+from app.application.pipeline.parsers.codificacion import (
+    detectar_codificacion as _detectar_codificacion,
+)
+from app.application.pipeline.parsers.formato_numeros import (
+    decidir_formato as _decidir_formato_numeros,
+)
+from app.application.pipeline.parsers.formato_numeros import (
+    filas_de_muestra as _filas_de_muestra_formato,
 )
 
 # La inferencia de encabezado vive en la capa de aplicación desde el
@@ -627,7 +637,7 @@ def _count_bulk_collect_remaining(engine, portal: str | None = None) -> dict[str
         "  SELECT 1 FROM raw.cached_datasets cd "
         "  WHERE cd.dataset_id = d.id "
         "    AND cd.status IN ('ready', 'permanently_failed')"
-        ")" + sql_sin_reemplazados("d")
+        ")" + sql_sin_reemplazados("d") + sql_sin_carga_propia("d")
     )
     # Sprint 24: aligned with the dispatcher SELECT — `eligible_individual`
     # now counts rows that PASS the per-(portal,title) cap (rn <= 10), and
@@ -2452,35 +2462,70 @@ def _stream_download(
 
 
 def _detect_encoding_robust(file_path: str) -> str:
-    """Detect file encoding using charset_normalizer.
-
-    More reliable than the previous UnicodeDecodeError-fallback chain: catches
-    Latin-1/Windows-1252 files whose bytes are valid UTF-8 (no decode error
-    raised) but produce mojibake when read as UTF-8, which silently breaks
-    downstream sniffers. Returns a pandas/Python-friendly encoding name.
-    """
+    """The file's encoding, for `open` and `pd.read_csv` (see `codificacion`)."""
     try:
-        from charset_normalizer import from_path
-
-        result = from_path(file_path, steps=2, chunk_size=4096).best()
-        if result is not None:
-            enc = (result.encoding or "").lower().replace("_", "-")
-            # Normalize to pandas-friendly aliases.
-            if enc in ("ascii", "utf-8"):
-                return "utf-8-sig"
-            if enc in ("iso-8859-1", "latin-1", "latin1"):
-                return "latin-1"
-            if enc in ("windows-1252", "cp1252"):
-                return "windows-1252"
-            if enc.startswith("iso-8859"):
-                return enc
-            return enc
-    except Exception:
-        pass
-    return "utf-8-sig"
+        with open(file_path, "rb") as f:
+            return _detectar_codificacion(f)
+    except OSError:
+        return "utf-8-sig"
 
 
 def _detect_csv_params(file_path: str) -> dict:
+    """Everything `pd.read_csv` needs for this file: dialect, then number format.
+
+    Every CSV path goes through here — the preview, the chunked load and each
+    ZIP member — so they all read numbers the same way.
+    """
+    params = _detect_csv_dialect(file_path)
+    params.update(_detect_csv_number_format(file_path, params))
+    return params
+
+
+def _detect_csv_number_format(file_path: str, params: dict) -> dict:
+    """Thousands/decimal marks and text-only columns, decided on a text sample.
+
+    Pandas defaults read `2.134` (2,134 people, Argentine thousands) as 2.134;
+    the decision itself lives in `formato_numeros`. If the sample cannot be
+    read, nothing is added and the file loads exactly as before.
+    """
+    read_params = {k: v for k, v in params.items() if not k.startswith("_")}
+    sample_path = file_path
+    if params.get("_outer_quoted_lines"):
+        sample_path = _sanitize_outer_quoted_lines(
+            file_path, encoding=params.get("encoding", "utf-8")
+        )
+
+    def _read_sample(read: dict) -> pd.DataFrame:
+        width = pd.read_csv(sample_path, nrows=1, dtype=str, **read).shape[1]
+        return pd.read_csv(sample_path, nrows=_filas_de_muestra_formato(width), dtype=str, **read)
+
+    # The same fallbacks the loaders use: latin-1 past the first lines, and
+    # the python engine when the C parser chokes.
+    try:
+        try:
+            sample = _read_sample(read_params)
+        except UnicodeDecodeError:
+            sample = _read_sample({**read_params, "encoding": "latin-1"})
+        except pd.errors.ParserError:
+            sample = _read_sample({**read_params, "engine": "python"})
+    except Exception:
+        logger.info("Number-format sample failed for %s; pandas defaults", file_path, exc_info=True)
+        return {}
+    finally:
+        if sample_path != file_path:
+            os.unlink(sample_path)
+    formato = _decidir_formato_numeros([sample.iloc[:, i] for i in range(sample.shape[1])])
+    if formato.argentino or formato.como_texto:
+        logger.info(
+            "CSV number format for %s: argentino=%s, text columns %s",
+            file_path,
+            formato.argentino,
+            [str(sample.columns[i]) for i in formato.como_texto][:10],
+        )
+    return formato.opciones_read_csv()
+
+
+def _detect_csv_dialect(file_path: str) -> dict:
     """Read first few lines to detect encoding and separator.
 
     Two-stage detection:
@@ -6311,6 +6356,13 @@ def collect_dataset(self, dataset_id: str, force_heavy: bool = False, force_repa
             logger.info("Dataset %s (%s, %s): lo carga ddjj_tasks", dataset_id, portal, title)
             return {"skipped": "reemplazado_por_ddjj"}
 
+        if tiene_carga_propia(portal):
+            # Este camino no sabe de hojas: guardaría la primera del archivo con
+            # el título de otra. El SQL del despacho sólo cubre a `bulk_collect_all`;
+            # a acá llegan todos los que encolan esta tarea.
+            logger.info("Dataset %s (%s): lo carga su propia tarea", dataset_id, portal)
+            return {"skipped": "carga_propia"}
+
         # MASTERPLAN Fase 1.5: route through the destination resolver so the
         # raw-layer feature flag controls where the table lands. When
         # `OPENARG_USE_RAW_LAYER` is unset/0 the resolver returns the legacy
@@ -8011,7 +8063,10 @@ def bulk_collect_all(self, portal: str | None = None, chain_depth: int = 0):
             bypass_clause = "    AND d2.portal <> ALL(:bypass_portals) "
             params["bypass_portals"] = list(bypass_burned_portals)
         query = query.replace("{bypass_clause}", bypass_clause)
-        query = query.replace("{portal_clause}", portal_clause + sql_sin_reemplazados("d"))
+        query = query.replace(
+            "{portal_clause}",
+            portal_clause + sql_sin_reemplazados("d") + sql_sin_carga_propia("d"),
+        )
 
         with engine.connect() as conn:
             rows = conn.execute(text(query), params).fetchall()
@@ -8103,7 +8158,8 @@ def bulk_collect_all(self, portal: str | None = None, chain_depth: int = 0):
             large_portal_clause = "    AND d.portal = :portal "
             large_params["portal"] = portal
         large_query = large_query.replace(
-            "{portal_clause}", large_portal_clause + sql_sin_reemplazados("d")
+            "{portal_clause}",
+            large_portal_clause + sql_sin_reemplazados("d") + sql_sin_carga_propia("d"),
         )
         with engine.connect() as conn:
             large_groups = conn.execute(text(large_query), large_params).fetchall()

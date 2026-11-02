@@ -20,6 +20,7 @@ sentences with no leading or trailing space.
 
 from __future__ import annotations
 
+from app.application.answers.agent_engine import _ChunkCleaner
 from app.application.pipeline.nodes.analyst import _scrub_internal_identifiers
 
 
@@ -50,10 +51,49 @@ class TestStreamingPreservesWordBoundaries:
         assert "661 leyes" in out
         assert " del período" in out, "the following chunk keeps its separator"
 
+    def test_a_schema_qualified_leak_leaves_nothing_mid_stream(self) -> None:
+        out = _stream(["Hay", " 42", " en", " `raw.cache_ddjj_oa`", " del", " período"])
+        # Cada fragmento conserva sus bordes: quedan dos espacios, no un resto.
+        assert out.split() == "Hay 42 en del período".split()
+
     def test_a_chunk_that_is_entirely_a_leak_does_not_glue_its_neighbours(self) -> None:
         out = _stream(["total", " cache_presupuesto_2025", " correcto"])
         assert "cache_presupuesto_2025" not in out
         assert "totalcorrecto" not in out
+
+
+class TestRawTableNamesInTheStream:
+    """`_ChunkCleaner` corta en espacios: un nombre `raw.` no llega partido."""
+
+    NAME = "raw.buenos_aires_prov__egresos_hospitalarios__dbcccf6f__v1"
+
+    def _through_cleaner(self, deltas: list[str]) -> str:
+        cleaner = _ChunkCleaner()
+        return "".join(cleaner.feed(d) for d in deltas) + cleaner.flush()
+
+    def _cut_every(self, text: str, size: int) -> list[str]:
+        return [text[i : i + size] for i in range(0, len(text), size)]
+
+    def test_a_name_split_across_deltas_never_reaches_the_user(self) -> None:
+        answer = f"Según `{self.NAME}` hay 42 registros."
+        for size in (1, 2, 3, 7, 13):
+            out = self._through_cleaner(self._cut_every(answer, size))
+            assert out == "Según egresos hospitalarios hay 42 registros.", f"cada {size}"
+
+    def test_a_citation_split_across_deltas_is_removed(self) -> None:
+        answer = f"**Egresos** (`{self.NAME}`)\nPor año y región."
+        for size in (1, 2, 3, 7, 13):
+            out = self._through_cleaner(self._cut_every(answer, size))
+            assert self.NAME not in out and "(`" not in out, f"cada {size}"
+            assert out.split() == "**Egresos** Por año y región.".split(), f"cada {size}"
+
+    def test_a_fragment_keeps_its_edges_when_the_name_is_replaced(self) -> None:
+        assert _stream(["según", f" {self.NAME}", " hay 42"]) == (
+            "según egresos hospitalarios hay 42"
+        )
+
+    def test_a_fragment_that_is_only_a_citation_does_not_glue_its_neighbours(self) -> None:
+        assert _stream(["Egresos", f" (`{self.NAME}`)", " por año"]) == "Egresos por año"
 
 
 class TestAssembledAnswerUnchanged:

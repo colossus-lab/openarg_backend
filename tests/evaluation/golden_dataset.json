@@ -1837,6 +1837,18 @@
     "no (?:tengo|tenemos|cuento|contamos|hay|encontr|dispongo|est[aá]|figura|incluye|cubre)"
    ],
    "rationale": "OpenArg no tiene el dato (verificado por título en staging el 04-oct; también en el gold set de búsqueda): la respuesta tiene que decirlo. 0 títulos de audiencia televisiva; la búsqueda trae el 'Registro Único de Audiencias de Gestión de Intereses'."
+  },
+  {
+   "id": "sin_evidencia_001",
+   "category": "sin_evidencia",
+   "question": "Contame paso a paso cómo buscaste la inflación de agosto",
+   "expected_intent": "inflacion",
+   "expected_answer_contains": [],
+   "expected_sources": [],
+   "expected_connector": null,
+   "difficulty": "hard",
+   "cifras_con_evidencia": true,
+   "rationale": "Una pregunta que distrae del dato: el 02-nov, con la pregunta larga («… de agosto de 2026 y qué fuiste pensando…»), contestó 3,0 % sin ninguna herramienta en 3 de 7 corridas (el dato de agosto de 2026 era 1,66 %). Falla si da una cifra sin haber leído datos; buscar y dar el dato, o decir que no lo leyó, aprueba. No se fija el valor: sin año, «agosto» cambia con la fecha."
   }
  ]
 }

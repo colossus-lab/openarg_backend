@@ -1035,7 +1035,11 @@ async def indec_live_fallback(nl_query: str) -> list[DataResult]:
     """
     import asyncio as _asyncio
 
-    from app.infrastructure.celery.tasks.indec_tasks import INDEC_DATASETS, _download_and_parse
+    from app.infrastructure.celery.tasks.indec_tasks import (
+        INDEC_DATASETS,
+        _download_and_parse,
+        current_url,
+    )
 
     matched_ids = _match_indec_datasets(nl_query)
     if not matched_ids:
@@ -1050,6 +1054,8 @@ async def indec_live_fallback(nl_query: str) -> list[DataResult]:
         if not ds_info:
             return None
         try:
+            # La edición vigente de los archivos con fecha en el nombre.
+            ds_info = {**ds_info, "url": await _asyncio.to_thread(current_url, ds_info)}
             sheets = await _asyncio.to_thread(_download_and_parse, ds_info["url"])
             if not sheets:
                 return None

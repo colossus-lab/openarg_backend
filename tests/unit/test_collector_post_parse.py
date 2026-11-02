@@ -9,11 +9,13 @@ recreating the full collector environment (no DB, no Celery).
 from __future__ import annotations
 
 import io
+import random
 from pathlib import Path
 
 import pandas as pd
 
 from app.infrastructure.celery.tasks.collector_tasks import (
+    _detect_csv_params,
     _post_parse_normalize,
     _read_csv_preview,
     _read_excel_frame,
@@ -186,3 +188,135 @@ def test_read_excel_frame_applies_post_parse(tmp_path: Path):
     assert any("provincia" in c.lower() for c in cols_str) or any(
         "anio" in c.lower() for c in cols_str
     )
+
+
+# ── Separador de miles (hackatón del 30-oct-2026) ─────────────────────────
+#
+# `00._educ_superior_datos.csv` (datos.gob.ar 6ac26ff9): VALOR son cantidades
+# de personas con punto de miles. Con los valores por defecto de pandas «2.134»
+# se guardaba 2,134 y los estudiantes de grado de 2023 sumaban ~5.700.
+
+EDUC_HEADER = (
+    "ANIO;TIPO_UNIV;NIVEL_ACADEM;OF_ACADEM;DISCIP_OCDE;DISCIP_ESPECIF;TIPO_ALUMNO;U_MED;VALOR"
+)
+# Las primeras filas del archivo real, tal cual (latin-1).
+EDUC_PRIMERAS = [
+    "2014;Privado;Grado;Otros;Ciencias Agrícolas;Ciencias Agropecuarias;EGRESADOS;"
+    "Cantidad de personas;124",
+    "2014;Privado;Grado;Otros;Ciencias Agrícolas;Ciencias Agropecuarias;ESTUDIANTES;"
+    "Cantidad de personas;1.475",
+    "2014;Privado;Grado;Otros;Ciencias Agrícolas;Veterinaria;EGRESADOS;Cantidad de personas;119",
+    "2014;Privado;Grado;Otros;Ciencias Agrícolas;Veterinaria;ESTUDIANTES;"
+    "Cantidad de personas;2.134",
+    "2014;Privado;Posgrado;Doctorado;Ciencias Agrícolas;Ciencias Agropecuarias;EGRESADOS;"
+    "Cantidad de personas;2",
+]
+
+
+def _con_puntos(n: int) -> str:
+    return f"{n:,}".replace(",", ".")
+
+
+def _educ_csv(path: Path, filas: int = 400) -> Path:
+    """El formato real: las primeras filas del archivo y después cantidades de
+    hasta seis cifras, todas con punto de miles (como en el archivo, que no
+    trae ningún millón ni ninguna coma)."""
+    rng = random.Random(30)
+    lineas = [EDUC_HEADER, *EDUC_PRIMERAS]
+    for i in range(filas):
+        anio = 2014 + i % 10
+        tipo = "ESTUDIANTES" if i % 2 else "EGRESADOS"
+        valor = rng.randint(1_000, 120_000) if i % 2 else rng.randint(0, 999)
+        lineas.append(
+            f"{anio};Estatal;Grado;Otros;Ciencias Sociales;Disciplina {i % 37};{tipo};"
+            f"Cantidad de personas;{_con_puntos(valor)}"
+        )
+    path.write_text("\n".join(lineas) + "\n", encoding="latin-1")
+    return path
+
+
+def test_educ_superior_lee_el_punto_como_miles(tmp_path: Path):
+    csv_path = _educ_csv(tmp_path / "00._educ_superior_datos.csv")
+
+    params = _detect_csv_params(str(csv_path))
+    df = _read_csv_preview(str(csv_path), nrows=1000, csv_params=params)
+
+    assert (params["thousands"], params["decimal"]) == (".", ",")
+    assert pd.api.types.is_numeric_dtype(df["VALOR"])
+    assert df["VALOR"].head(5).tolist() == [124, 1475, 119, 2134, 2]
+    assert df["VALOR"].max() > 1000
+    assert pd.api.types.is_integer_dtype(df["ANIO"])
+    assert df["U_MED"].iloc[0] == "Cantidad de personas"
+
+
+def _enut_csv(path: Path, valores: list[str]) -> Path:
+    lineas = ["actividad;sexo;minutos_por_dia"]
+    lineas += [f"Actividad {i};{'Mujer' if i % 2 else 'Varón'};{v}" for i, v in enumerate(valores)]
+    path.write_text("\n".join(lineas) + "\n", encoding="utf-8")
+    return path
+
+
+def test_enut_sin_evidencia_no_decide_miles(tmp_path: Path):
+    """H001: «500» junto a «58.333» son también minutos con tres decimales
+    ingleses. Sin evidencia no se decide miles: la columna queda como texto y
+    `consultas.numeros` se niega a calcular en vez de leer mil veces más."""
+    valores = ["500", "58.333", "120", "241.667", "35", "12.250", "90", "300", "47.125"]
+    csv_path = _enut_csv(tmp_path / "enut.csv", valores)
+
+    params = _detect_csv_params(str(csv_path))
+    df = _read_csv_preview(str(csv_path), nrows=100, csv_params=params)
+
+    assert "thousands" not in params
+    assert not pd.api.types.is_numeric_dtype(df["minutos_por_dia"])
+    assert df["minutos_por_dia"].tolist() == valores
+
+
+def test_tres_decimales_con_evidencia_inglesa_siguen_siendo_decimales(tmp_path: Path):
+    valores = ["500", "58.333", "12.5", "7.25", "33.1", "0.5", "41.75", "120"]
+    csv_path = _enut_csv(tmp_path / "enut_con_decimales.csv", valores)
+
+    params = _detect_csv_params(str(csv_path))
+    df = _read_csv_preview(str(csv_path), nrows=100, csv_params=params)
+
+    assert "thousands" not in params and "dtype" not in params
+    assert df["minutos_por_dia"].tolist() == [500, 58.333, 12.5, 7.25, 33.1, 0.5, 41.75, 120]
+
+
+def test_archivo_argentino_deja_como_texto_lo_que_pandas_leeria_mal(tmp_path: Path):
+    """Con `thousands="."` pandas borra el punto en cualquier valor: «-34.6037»
+    daría -346037 y «30.10.2026», 30102026. Esas columnas van como texto."""
+    lineas = ["fecha;lat;monto;cantidad"]
+    for i in range(30):
+        lineas.append(
+            f"{1 + i % 28:02d}.10.2026;-34.{6037 + i};{_con_puntos(1_000_000 + i * 1234)},5{i % 10};"
+            f"{_con_puntos(i * 37)}"
+        )
+    csv_path = tmp_path / "montos.csv"
+    csv_path.write_text("\n".join(lineas) + "\n", encoding="utf-8")
+
+    params = _detect_csv_params(str(csv_path))
+    df = _read_csv_preview(str(csv_path), nrows=100, csv_params=params)
+
+    assert (params["thousands"], params["decimal"]) == (".", ",")
+    assert df["fecha"].iloc[0] == "01.10.2026"
+    assert df["lat"].iloc[0] == "-34.6037"
+    assert df["monto"].iloc[1] == 1_001_234.51
+    assert df["cantidad"].iloc[28] == 1036
+
+
+def test_ambiguo_con_enteros_de_cuatro_cifras_queda_como_texto(tmp_path: Path):
+    """Quien escribe «2.134» con punto de miles no escribe «1475» sin él."""
+    lineas = ["provincia;monto;poblacion"]
+    for i in range(30):
+        lineas.append(f"P{i};{_con_puntos(1_000_000 + i * 1234)},5;{_con_puntos(100 + i * 97)}")
+    lineas.append("P30;2.000.000,5;1475")
+    csv_path = tmp_path / "mezcla.csv"
+    csv_path.write_text("\n".join(lineas) + "\n", encoding="utf-8")
+
+    params = _detect_csv_params(str(csv_path))
+    df = _read_csv_preview(str(csv_path), nrows=100, csv_params=params)
+
+    assert params["thousands"] == "."
+    assert pd.api.types.is_float_dtype(df["monto"])
+    assert not pd.api.types.is_numeric_dtype(df["poblacion"])
+    assert df["poblacion"].iloc[20] == "2.040"

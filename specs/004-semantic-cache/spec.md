@@ -19,7 +19,7 @@ It is one of the modules with a **critical fix applied in Mar 2026**: the SQL `:
 | Term | Definition |
 |---|---|
 | **Exact match** | Hit by exact SHA-256 hash of the normalized query. |
-| **Similarity match** | Hit by cosine distance over the embedding, with a configurable threshold (default 0.92). |
+| **Similarity match** | Hit by cosine distance over the embedding, with a configurable threshold (default 0.92), only if the cached question asks with the same terms (`asks_the_same`). |
 | **Normalization** | Lowercase + strip + NFC Unicode normalization before hashing. |
 | **Intent** | Tag derived from the query (`dolar` → real-time, `inflacion` → daily, `ddjj` → static). |
 | **TTL by intent** | 300s (real-time) / 1800s (daily) / 7200s (static). |
@@ -30,7 +30,7 @@ It is one of the modules with a **critical fix applied in Mar 2026**: the SQL `:
 **As** the system, **I want** a query "cuánto esta el dólar" to be answered from cache if an identical query was answered less than 5 minutes ago.
 
 ### US-002 (P1) — Similarity hit
-**As** the system, **I want** "cuánto cuesta el dólar hoy" to return the cache of "cuánto está el dólar" if they are semantically similar (threshold 0.92).
+**As** the system, **I want** "cuánto cuesta el dólar hoy" to return the cache of "cuánto está el dólar" if they are semantically similar (threshold 0.92) and ask with the same terms. "Variación mensual" and "variación interanual" of one series are closer than many paraphrases, and must not share an answer.
 
 ### US-003 (P2) — Differentiated TTLs
 **As** the system, **I need** a short TTL (300s) for volatile data (exchange rates) and a long TTL (7200s) for stable data (DDJJ).
@@ -42,7 +42,7 @@ It is one of the modules with a **critical fix applied in Mar 2026**: the SQL `:
 
 - **FR-001**: The system MUST normalize the query before hashing: lowercase, strip, NFC unicode.
 - **FR-002**: The system MUST try exact hash match first, similarity match second.
-- **FR-003**: Similarity match MUST use `cosine distance` over `embedding vector(1024)` with a configurable threshold (default `CACHE_SIMILARITY_THRESHOLD=0.92`).
+- **FR-003**: Similarity match MUST use `cosine distance` over `embedding vector(1024)` with a configurable threshold (default `CACHE_SIMILARITY_THRESHOLD=0.92`), and MUST NOT serve a near question whose terms differ once filler words are removed (`asks_the_same`). A wrong hit serves another question's figure; a miss costs one model call.
 - **FR-004**: Both matches MUST honor `expires_at` in the DB.
 - **FR-005**: The set MUST use UPSERT with `ON CONFLICT` over `question_hash`.
 - **FR-006**: The set MUST validate the embedding against NaN/Inf before persisting.
@@ -66,7 +66,7 @@ It is one of the modules with a **critical fix applied in Mar 2026**: the SQL `:
 
 ### Assumptions
 - Cohere Embed v3 embeddings are deterministic (same input → same output).
-- A threshold of 0.92 is appropriate for the Spanish/Argentine domain.
+- A threshold of 0.92 alone does not tell two figures of one series apart (see CL-002).
 - The cache TTL is sufficient for most queries.
 
 ### Out of scope
@@ -78,7 +78,7 @@ It is one of the modules with a **critical fix applied in Mar 2026**: the SQL `:
 ## 7. Open Questions
 
 - **[RESOLVED CL-001]** — **No cleanup task exists**. Confirmed: greps for `query_cache` in `celery/tasks/` and for `DELETE.*query_cache` across the entire codebase return zero matches. Expired entries **accumulate indefinitely**; they are only filtered on reads via `expires_at > now()`. The HNSW index degrades with dead entries. Concrete debt — see `FIX_BACKLOG.md#FIX-007`.
-- **[NEEDS CLARIFICATION CL-002]** — Was the 0.92 threshold validated empirically? Against which dataset?
+- **[RESOLVED CL-002]** — No threshold separates them. Measured on staging on 2026-11-02 with the embedding the cache uses: questions that differ only in the measure (index, monthly, year-on-year, cumulative) score 0.91-0.989, 47 of 48 pairs at or above 0.92; paraphrases of one question score 0.81-0.99. Hence the term check in FR-003.
 - **[RESOLVED CL-003]** — The mapping is a hardcoded `INTENT_TTL_MAP: dict[str, int]` in `src/app/infrastructure/adapters/cache/semantic_cache.py:23-44`, with only two TTL buckets: `TTL_DAILY = 1800s` (30 min) for volatile intents like `inflacion`, `series`, `emae`, `tipo_cambio`, `reservas`, `desempleo`, and `TTL_STATIC = 7200s` (2h) for stable ones like `ddjj`, `sesiones`, `ckan`, `catalogo`, `georef`. `ttl_for_intent()` tokenises the intent string and falls back to `TTL_DAILY` when nothing matches. No config file, no env var, no per-user override. (resolved 2026-04-11 via code inspection)
 - **[RESOLVED CL-004]** — **Direct verification in the production DB (2026-04-10)**: `query_cache` has **just 1 entry total** (created on 2026-04-06, expired), table size 1248 kB (mostly HNSW index overhead). **No hit-rate metrics are exported** — `MetricsCollector` has `record_cache_event()` but it has not been verified whether it is wired into all paths. With current traffic volume (~28 historical queries) the hit rate is trivially 0%. **Prerequisites for a useful metric**: (1) volume ≥100 queries/day; (2) consistent wiring of `record_cache_event` in the `cache.py` node; (3) exposure in `/api/v1/metrics`. Without those, measuring hit rate is not actionable.
 - **[NEEDS CLARIFICATION CL-005]** — What happens to the cached response if the underlying model changes (e.g. an upgrade of Claude Haiku)?
