@@ -42,6 +42,9 @@ from app.application.pipeline.parsers import (
     time_column_ratio,
     unpivot_if_time_pivoted,
 )
+from app.application.pipeline.parsers.codificacion import (
+    detectar_codificacion as _detectar_codificacion,
+)
 from app.application.pipeline.parsers.formato_numeros import (
     decidir_formato as _decidir_formato_numeros,
 )
@@ -2458,32 +2461,12 @@ def _stream_download(
 
 
 def _detect_encoding_robust(file_path: str) -> str:
-    """Detect file encoding using charset_normalizer.
-
-    More reliable than the previous UnicodeDecodeError-fallback chain: catches
-    Latin-1/Windows-1252 files whose bytes are valid UTF-8 (no decode error
-    raised) but produce mojibake when read as UTF-8, which silently breaks
-    downstream sniffers. Returns a pandas/Python-friendly encoding name.
-    """
+    """The file's encoding, for `open` and `pd.read_csv` (see `codificacion`)."""
     try:
-        from charset_normalizer import from_path
-
-        result = from_path(file_path, steps=2, chunk_size=4096).best()
-        if result is not None:
-            enc = (result.encoding or "").lower().replace("_", "-")
-            # Normalize to pandas-friendly aliases.
-            if enc in ("ascii", "utf-8"):
-                return "utf-8-sig"
-            if enc in ("iso-8859-1", "latin-1", "latin1"):
-                return "latin-1"
-            if enc in ("windows-1252", "cp1252"):
-                return "windows-1252"
-            if enc.startswith("iso-8859"):
-                return enc
-            return enc
-    except Exception:
-        pass
-    return "utf-8-sig"
+        with open(file_path, "rb") as f:
+            return _detectar_codificacion(f)
+    except OSError:
+        return "utf-8-sig"
 
 
 def _detect_csv_params(file_path: str) -> dict:

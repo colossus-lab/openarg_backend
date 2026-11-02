@@ -53,6 +53,8 @@ _PARSER_MODULES: tuple[str, ...] = (
     # Separador de miles y de decimales de los CSV (30-oct-2026): antes pandas
     # leía «2.134» personas como 2,134.
     "app.application.pipeline.parsers.formato_numeros",
+    # La codificación decide los nombres de columna: con cp1250, «Año» era «Ańo».
+    "app.application.pipeline.parsers.codificacion",
 )
 
 # Repairs rewrite a table's columns after the fact, so a change to them changes
