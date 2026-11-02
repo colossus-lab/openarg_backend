@@ -52,6 +52,7 @@ from typing import Any
 
 from sqlalchemy import text
 
+from app.application.catalog.carga_propia import sql_sin_carga_propia
 from app.infrastructure.celery.app import celery_app
 from app.infrastructure.celery.tasks._db import get_sync_engine
 
@@ -67,13 +68,14 @@ OUR_FAULT = (
 )
 
 _CANDIDATES_SQL = text(
-    """
+    f"""
     SELECT cd.id AS cd_id, cd.dataset_id, d.portal
     FROM raw.cached_datasets cd
     JOIN datasets d ON d.id = cd.dataset_id
     WHERE cd.status IN ('error', 'permanently_failed')
       AND cd.error_category = ANY(:cats)
       AND d.download_url IS NOT NULL AND d.download_url <> ''
+      {sql_sin_carga_propia("d")}
       -- The age guard belongs only to `error`, which the ordinary retry path
       -- still handles. `permanently_failed` is terminal by definition: nothing
       -- else will ever pick it up, so making it wait means making it wait

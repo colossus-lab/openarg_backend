@@ -195,6 +195,7 @@ def create_celery() -> Celery:
         "openarg.snapshot_bcra": {"queue": "ingest"},
         "openarg.ingest_bac": {"queue": "ingest"},
         "openarg.ingest_indec": {"queue": "ingest"},
+        "openarg.retirar_copias_indec": {"queue": "ingest"},
         "openarg.scrape_dkan_rosario": {"queue": "scraper"},
         "openarg.scrape_dkan_jujuy": {"queue": "scraper"},
         "openarg.scrape_senado": {"queue": "scraper"},
