@@ -156,7 +156,7 @@ def validate_dataset(entries: list[dict]) -> list[str]:
                 f"{eid}: expected_period_from: {p}"
                 for p in spec_problems(entry["expected_period_from"])
             )
-        for flag in ("juez_neutralidad", "rotular_no_oficial"):
+        for flag in ("juez_neutralidad", "rotular_no_oficial", "cifras_con_evidencia"):
             if flag in entry and not isinstance(entry[flag], bool):
                 errors.append(f"{eid}: {flag} tiene que ser true o false")
     seen: set[str] = set()
