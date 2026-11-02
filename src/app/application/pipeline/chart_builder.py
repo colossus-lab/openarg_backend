@@ -79,23 +79,16 @@ def _sort_chart_rows(rows: list[dict[str, Any]], x_key: str) -> list[dict[str, A
     return sorted(rows, key=key)
 
 
-def _looks_like_mixed_quote_snapshot(
-    result: DataResult,
-    rows: list[dict[str, Any]],
-    x_key: str,
-    numeric_keys: list[str],
-) -> bool:
-    if x_key != "fecha":
-        return False
-    if not rows:
-        return False
-    if {key.lower() for key in numeric_keys} != {"compra", "venta"}:
-        return False
-    title = result.dataset_title.lower()
-    if "todas las casas" not in title:
-        return False
-    x_values = [str(row.get(x_key, "")) for row in rows]
-    return len(set(x_values)) < len(x_values)
+def _repite_el_eje(rows: list[dict[str, Any]], x_key: str) -> bool:
+    """Varias filas en un mismo momento: son varias series, no una.
+
+    Unirlas dibuja una línea que no existe. En `mart.pobreza_indec_aglomerados`
+    cada semestre trae pobreza e indigencia de hogares y de personas, y el
+    gráfico iba de 32,3 a 5,6 dentro del mismo semestre. Lo mismo en el dólar de
+    todas las casas: varias cotizaciones con la misma hora.
+    """
+    valores = [str(row.get(x_key, "")) for row in rows]
+    return len(set(valores)) < len(valores)
 
 
 def _ddjj_comparable(row: dict[str, Any], numeric_keys: list[str]) -> dict[str, Any] | None:
@@ -224,9 +217,9 @@ def build_deterministic_charts(
         )
         if is_time:
             clean = _sort_chart_rows(clean, x_key)
-        if _looks_like_mixed_quote_snapshot(result, clean, x_key, numeric_keys):
+        if time_key and _repite_el_eje(clean, x_key):
             logger.info(
-                "Skipping misleading mixed quote line chart for dataset '%s'",
+                "Skipping chart with a repeated time axis for dataset '%s'",
                 result.dataset_title,
             )
             continue

@@ -89,6 +89,8 @@ class MartInfo:
     row_count: int | None
     score: float = 0.0
     columns: list[dict] | None = None
+    # El archivo de origen, sólo si el mart sale de uno solo y se conoce.
+    source_url: str = ""
 
 
 @dataclass
