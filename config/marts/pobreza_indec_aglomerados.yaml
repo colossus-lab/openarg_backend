@@ -1,18 +1,12 @@
 id: pobreza_indec_aglomerados
-version: 0.2.0
+version: 0.3.0
 description: |
   Incidencia semestral de la pobreza y la indigencia en hogares y personas,
   total de los 31 aglomerados urbanos, publicada por INDEC en su Informe
   Técnico (Cuadro 1). Desde el 2do semestre de 2016.
 
-  La tabla raw viene TIME-PIVOTED (un período por columna). Este mart hace
-  UNPIVOT en SQL via `CROSS JOIN LATERAL VALUES` para exponer formato long:
-  (indicador, periodo, valor).
-
-  `indicador` vale `Hogares` o `Personas`, tanto para pobreza como para
-  indigencia: el Excel los separa con una fila de título, sin dato, que el
-  `IS NOT NULL` de abajo descarta. Cada par (indicador, periodo) tiene dos
-  filas, y la menor es la de indigencia.
+  `medida` vale `pobreza` o `indigencia`; `indicador`, `Hogares` o `Personas`.
+  Cada fila es un valor de una medida, un indicador y un semestre.
 domain: economia
 
 sources:
@@ -21,20 +15,25 @@ sources:
     - "indec::*pobreza_informe_cuadro_1"
 
 canonical_columns:
+  - name: medida
+    type: text
+    description: "`pobreza` o `indigencia` (la fila de título de cada bloque del Excel, `seccion` en raw)"
   - name: indicador
     type: text
-    description: Nombre del indicador de pobreza/indigencia (`Indicador` en raw)
+    description: "`Hogares` o `Personas` (`Indicador` en raw)"
   - name: periodo
     type: text
     description: Semestre del registro (e.g. `2do. semestre 2016`, `1er. semestre 2025`)
   - name: valor
     type: numeric
-    description: Valor publicado por INDEC para ese (indicador, período). Texto porque el upstream mezcla números y notas como `(1)` o `s/d`.
+    description: Porcentaje publicado por INDEC para esa medida, indicador y período.
 
 sql: |
-  -- UNPIVOT explícito de los períodos columna → fila. Los nombres tienen
-  -- variantes ortográficas (`1er semestre 2020` sin punto) que reflejan los
-  -- headers del Excel original — los preservamos AS-IS para auditabilidad.
+  -- El Excel trae un período por columna y `ingest_indec` lo pasa a formato largo
+  -- (`_unpivot_semesters`): un semestre nuevo son filas, no una columna que frene
+  -- la carga ni haya que agregar acá. Los rótulos cambian de una edición a otra
+  -- (`1er semestre 2020`, `2do. semestre 2019 (1)`, el asterisco del dato más
+  -- nuevo), así que se normalizan para que cada semestre tenga uno solo.
   --
   -- Lee la hoja por su nombre. Antes matcheaba las 17 `indec__…informe_de_pobreza…`,
   -- que el colector había llenado con la primera hoja del archivo: daba bien por
@@ -43,55 +42,18 @@ sql: |
   WITH src AS (
     SELECT * FROM {{ live_tables_by_table_pattern(
         'cache_indec_pobreza_informe_cuadro_1',
-        expected_columns=[
-          'Indicador',
-          '2do. semestre 2016',
-          '1er. semestre 2017', '2do. semestre 2017',
-          '1er. semestre 2018', '2do. semestre 2018',
-          '1er. semestre 2019', '2do. semestre 2019 (1)',
-          '1er semestre 2020', '2do. semestre 2020 (2)',
-          '1er. semestre 2021', '2do. semestre 2021',
-          '1er. semestre 2022', '2do. semestre 2022',
-          '1er. semestre 2023', '2do. semestre 2023',
-          '1er. semestre 2024', '2do semestre 2024',
-          '1er. semestre 2025', '2do. semestre 2025',
-          '1er. semestre 2026*'
-        ],
-        # `Indicador` es lo único que la serie no puede perder. Si INDEC cambia
-        # el nombre de un semestre, ese se proyecta NULL y el `IS NOT NULL` de
-        # abajo lo descarta, sin vaciar el mart.
-        require_columns=['Indicador']
+        expected_columns=['seccion', 'Indicador', 'periodo', 'valor'],
+        require_columns=['seccion', 'Indicador', 'periodo', 'valor']
     ) }} sub
   )
   SELECT
+    lower(TRIM("seccion"))               AS medida,
     NULLIF(TRIM("Indicador"), '')        AS indicador,
-    v.periodo                            AS periodo,
-    {{ to_numeric('v.valor') }}      AS valor
+    regexp_replace(TRIM("periodo"), '^(1er|2do)\.?\s+semestre\s+(\d{4}).*$', '\1. semestre \2') AS periodo,
+    {{ to_numeric('"valor"') }}      AS valor
   FROM src
-  CROSS JOIN LATERAL (VALUES
-    ('2do. semestre 2016',     src."2do. semestre 2016"),
-    ('1er. semestre 2017',     src."1er. semestre 2017"),
-    ('2do. semestre 2017',     src."2do. semestre 2017"),
-    ('1er. semestre 2018',     src."1er. semestre 2018"),
-    ('2do. semestre 2018',     src."2do. semestre 2018"),
-    ('1er. semestre 2019',     src."1er. semestre 2019"),
-    ('2do. semestre 2019',     src."2do. semestre 2019 (1)"),
-    ('1er. semestre 2020',     src."1er semestre 2020"),
-    ('2do. semestre 2020',     src."2do. semestre 2020 (2)"),
-    ('1er. semestre 2021',     src."1er. semestre 2021"),
-    ('2do. semestre 2021',     src."2do. semestre 2021"),
-    ('1er. semestre 2022',     src."1er. semestre 2022"),
-    ('2do. semestre 2022',     src."2do. semestre 2022"),
-    ('1er. semestre 2023',     src."1er. semestre 2023"),
-    ('2do. semestre 2023',     src."2do. semestre 2023"),
-    ('1er. semestre 2024',     src."1er. semestre 2024"),
-    ('2do. semestre 2024',     src."2do semestre 2024"),
-    ('1er. semestre 2025',     src."1er. semestre 2025"),
-    ('2do. semestre 2025',     src."2do. semestre 2025"),
-    ('1er. semestre 2026',     src."1er. semestre 2026*")
-  ) AS v(periodo, valor)
   WHERE NULLIF(TRIM("Indicador"), '') IS NOT NULL
-    AND {{ to_numeric('v.valor') }} IS NOT NULL
+    AND {{ to_numeric('"valor"') }} IS NOT NULL
 
 refresh:
   policy: on_upstream_change

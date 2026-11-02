@@ -360,6 +360,47 @@ def _snap_monthly_periods_to_first(df: pd.DataFrame) -> pd.DataFrame:
     return df.assign(periodo=df["periodo"].astype(str).replace(fixes))
 
 
+# `1er. semestre 2017`, `1er semestre 2020`, `2do. semestre 2019 (1)`,
+# `1° semestre 2026*`.
+_SEMESTER_COLUMN_RE = re.compile(
+    r"^[12](?:er|do|°|º)?\.?\s+semestre\s+\d{4}\s*\*?\s*(?:\(\d+\))?$", re.I
+)
+
+
+def _unpivot_semesters(df: pd.DataFrame) -> pd.DataFrame:
+    """Melt a sheet with one label column and one column per semester.
+
+    Cuadro 1 of the poverty report adds a column with every edition, and the
+    asterisk of the provisional figure moves to the newest one, so a column also
+    goes away. `replace_table_keeping_dependents` rightly refuses that under a
+    mart, which froze `mart.pobreza_indec_aglomerados` until someone dropped it
+    by hand, twice a year. In long format a new semester is only more rows.
+
+    A row with no values followed by one with values is the title of the block
+    below it (`Pobreza`, `Indigencia`, each with its `Hogares` and `Personas`).
+    Melting drops the empty rows, and those titles are all that tells the blocks
+    apart, so they move to `seccion`. Empty rows at the end are the footnotes.
+    """
+    columns = [str(c) for c in df.columns]
+    label, periods = columns[0], columns[1:]
+    if len(periods) < 3 or not all(_SEMESTER_COLUMN_RE.match(c.strip()) for c in periods):
+        return df
+    empty = df[periods].isna().all(axis=1)
+    is_title = empty & ~empty.shift(-1, fill_value=True)
+    data = df.loc[~empty, [label, *periods]].copy()
+    data[label] = data[label].astype(str).str.strip()
+    id_vars = [label]
+    if is_title.any():
+        sections = df[label].where(is_title).ffill().loc[~empty]
+        data.insert(0, "seccion", sections.astype("string").str.strip())
+        id_vars = ["seccion", label]
+    return (
+        data.melt(id_vars=id_vars, value_vars=periods, var_name="periodo", value_name="valor")
+        .dropna(subset=["valor"])
+        .reset_index(drop=True)
+    )
+
+
 def _parse_xls_sheet(content: bytes, sheet: str | int) -> pd.DataFrame | None:
     """Parse a single Excel sheet, auto-detecting the header row."""
     try:
@@ -481,6 +522,7 @@ def _parse_xls_sheet(content: bytes, sheet: str | int) -> pd.DataFrame | None:
     # aggregate naturally. Idempotent: long-formatted sheets are returned
     # unchanged.
     df = unpivot_if_time_pivoted(df)
+    df = _unpivot_semesters(df)
 
     return _snap_monthly_periods_to_first(df)
 
@@ -689,6 +731,26 @@ def _registry_key(engine, table_name: str, suffix: str) -> tuple[str, int]:
     return f"indec::{_sanitize_table_name(suffix).removeprefix('cache_indec_')}", 1
 
 
+def _keep_rejected_sheet_unpublished(engine, table_name: str) -> None:
+    """A sheet the ingest gate rejected is `failed` in the catalogue.
+
+    `register_via_b_table` reconciles the row to `ready`: run for a rejected
+    sheet, it undid what `retirar_copias` had left, every month.
+    """
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                """
+                UPDATE catalog_resources
+                SET materialization_status = 'failed', updated_at = NOW()
+                WHERE resource_identity = :identity
+                  AND materialization_status NOT IN ('failed', 'materialization_corrupted')
+                """
+            ),
+            {"identity": _resource_identity("indec", f"indec-{table_name}")},
+        )
+
+
 def _ingest_sheet(engine, ds_info: dict, sheet_name: str, df: pd.DataFrame) -> None:
     """Write one sheet to its table and register it."""
     suffix = ds_info["id"] if sheet_name == "main" else f"{ds_info['id']}_{sheet_name}"
@@ -704,12 +766,18 @@ def _ingest_sheet(engine, ds_info: dict, sheet_name: str, df: pd.DataFrame) -> N
         "name": (ds_info["name"] if sheet_name == "main" else f"{ds_info['name']} — {sheet_name}"),
     }
     dataset_id = _register_dataset(engine, sheet_info, table_name, df)
-    if dataset_id:
-        from app.infrastructure.celery.tasks.scraper_tasks import (
-            index_dataset_embedding,
+    if not dataset_id:
+        _keep_rejected_sheet_unpublished(engine, table_name)
+        logger.warning(
+            "INDEC %s [%s]: rejected, not published → %s", ds_info["id"], sheet_name, table_name
         )
+        return
 
-        index_dataset_embedding.delay(dataset_id)
+    from app.infrastructure.celery.tasks.scraper_tasks import (
+        index_dataset_embedding,
+    )
+
+    index_dataset_embedding.delay(dataset_id)
 
     # Register in `raw_table_versions` so marts find this table via the
     # `live_table('indec::<source_id>')` macro, decoupling them from the
