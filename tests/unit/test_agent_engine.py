@@ -168,6 +168,11 @@ def _call(name: str, i: int = 1, **args: Any) -> ToolCall:
     return ToolCall(id=f"t{i}", name=name, input=args)
 
 
+def _ubicar() -> AgentTurn:
+    """Una vuelta con una herramienta que no da evidencia: lo que sigue sale en streaming."""
+    return _turn(calls=[_call("ubicar_lugar", texto="x")])
+
+
 # ── el ciclo ───────────────────────────────────────────────
 
 
@@ -275,6 +280,7 @@ async def test_sin_datos_leidos_no_hay_fuentes_ni_exito() -> None:
 async def test_el_texto_antes_de_las_herramientas_se_borra() -> None:
     llm = ScriptedLLM(
         [
+            _ubicar(),
             _turn("<respuesta>Voy a buscar.</respuesta>", calls=[_call("ubicar_lugar", texto="x")]),
             _turn("<respuesta>Respuesta final.</respuesta>"),
         ]
@@ -284,8 +290,23 @@ async def test_el_texto_antes_de_las_herramientas_se_borra() -> None:
         "Herramienta" if isinstance(e, StatusEvent) and e.connector else type(e).__name__
         for e in events
     ]
-    assert kinds.index("ClearAnswerEvent") < kinds.index("Herramienta")
+    clear = kinds.index("ClearAnswerEvent")
+    assert "ChunkEvent" in kinds[:clear]
+    assert "Herramienta" in kinds[clear:]
     assert events[-1].result.answer == "Respuesta final."
+
+
+async def test_el_texto_antes_de_la_primera_herramienta_no_sale() -> None:
+    llm = ScriptedLLM(
+        [
+            _turn("<respuesta>Voy a buscar.</respuesta>", calls=[_call("ubicar_lugar", texto="x")]),
+            _turn("<respuesta>Respuesta final.</respuesta>"),
+        ]
+    )
+    events = await _run(AgentEngine(llm, _deps()))
+    assert not any(isinstance(e, ClearAnswerEvent) for e in events)
+    streamed = "".join(e.content for e in events if isinstance(e, ChunkEvent))
+    assert streamed.strip() == "Respuesta final."
 
 
 async def test_el_texto_sin_marcas_antes_de_las_herramientas_no_sale() -> None:
@@ -301,7 +322,7 @@ async def test_el_texto_sin_marcas_antes_de_las_herramientas_no_sale() -> None:
 
 
 async def test_el_texto_sale_en_streaming_y_limpio() -> None:
-    llm = ScriptedLLM([_turn("Según cache_diputados_v2 hay 257 bancas.")])
+    llm = ScriptedLLM([_ubicar(), _turn("Según cache_diputados_v2 hay 257 bancas.")])
     events = await _run(AgentEngine(llm, _deps()))
     streamed = "".join(e.content for e in events if isinstance(e, ChunkEvent))
     assert "257 bancas" in streamed
@@ -363,7 +384,9 @@ async def test_lo_que_ya_salio_con_el_preambulo_se_reemplaza(
     """El chat web muestra lo que le llegó en streaming: si el modelo narra
     dentro de las marcas, el preámbulo ya salió cuando se sabe que lo es. El
     runner reemplaza el texto, como con el aviso de atraso."""
-    llm = ScriptedLLM([_turn(f"<respuesta>{_PADRON_PREAMBULO}\n\n{_PADRON}</respuesta>")])
+    llm = ScriptedLLM(
+        [_ubicar(), _turn(f"<respuesta>{_PADRON_PREAMBULO}\n\n{_PADRON}</respuesta>")]
+    )
     events = await _runner_events(monkeypatch, llm)
     streamed = "".join(e.content for e in events[:-3] if isinstance(e, ChunkEvent))
     assert "El total es claro" in streamed  # salió mientras se escribía
@@ -380,7 +403,7 @@ async def test_sin_marcas_no_sale_nada_hasta_el_final_y_sale_sin_preambulo(
     turno termina. No sale nada en streaming y al final sale una sola vez,
     limpia por ``sin_monologo``: lo que el chat guarda es lo que mostró, y
     eso vuelve a la historia del modelo. El log cuenta cuántas veces pasa."""
-    llm = ScriptedLLM([_turn(f"{_PADRON_PREAMBULO}\n\n{_PADRON}")])
+    llm = ScriptedLLM([_ubicar(), _turn(f"{_PADRON_PREAMBULO}\n\n{_PADRON}")])
     with caplog.at_level("INFO", logger=agent_module.logger.name):
         events = await _runner_events(monkeypatch, llm)
     chunks = [e.content for e in events if isinstance(e, ChunkEvent)]
@@ -401,7 +424,9 @@ async def test_con_marcas_sale_solo_lo_de_adentro(
         "La tabla solo llega hasta q2_2011 — son exactamente 36 columnas. "
         "El dato que necesito no está en esta tabla."
     )
-    llm = ScriptedLLM([_turn(f"{pensado}\n<respuesta>\n{_PADRON}\n</respuesta>\nListo.")])
+    llm = ScriptedLLM(
+        [_ubicar(), _turn(f"{pensado}\n<respuesta>\n{_PADRON}\n</respuesta>\nListo.")]
+    )
     with caplog.at_level("INFO", logger=agent_module.logger.name):
         events = await _runner_events(monkeypatch, llm)
     streamed = "".join(e.content for e in events if isinstance(e, ChunkEvent))
@@ -426,7 +451,7 @@ async def test_la_marca_partida_entre_fragmentos_se_reconoce() -> None:
             yield turn
 
     text = "Pienso un poco. <respuesta>El padrón registraba **110.179 usuarios**.</respuesta> Fin."
-    events = await _run(AgentEngine(Partido([_turn(text)]), _deps()))
+    events = await _run(AgentEngine(Partido([_ubicar(), _turn(text)]), _deps()))
     chunks = [e.content for e in events if isinstance(e, ChunkEvent)]
     assert "".join(chunks) == _PADRON
     assert not any("<" in c or "Pienso" in c or "Fin" in c for c in chunks)
@@ -1644,21 +1669,35 @@ def _causal_lines(caplog: pytest.LogCaptureFixture) -> list[dict[str, Any]]:
 async def test_una_frase_causal_queda_en_el_log_y_la_respuesta_sale_igual(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, mode: str | None
 ) -> None:
-    """neutralidad_004. Sin herramientas también se mira: nueva_24 contestó
-    sin ninguna."""
+    """neutralidad_004."""
     _modo(monkeypatch, mode)
-    llm = ScriptedLLM([_turn(NEUTRALIDAD_004)])
+    llm = ScriptedLLM([_ubicar(), _turn(NEUTRALIDAD_004)])
     with caplog.at_level("INFO", logger=agent_module.logger.name):
         events = await _run(AgentEngine(llm, _deps()))
     result = events[-1].result
     assert result.answer == NEUTRALIDAD_004
-    assert len(llm.calls) == 1
+    assert len(llm.calls) == 2
     assert not any(isinstance(e, ClearAnswerEvent) for e in events)
     [line] = _causal_lines(caplog)
     assert line["modo"] == "shadow"
     [frase] = line["frases"]
     assert "generó un rebrote inflacionario" in frase
     assert line["atribuidas"] == []
+
+
+async def test_sin_herramientas_tambien_se_mira_la_frase_causal(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """nueva_24 contestó sin ninguna herramienta."""
+    _modo(monkeypatch, None)
+    answer = "La suba de las tasas generó una caída del crédito."
+    llm = ScriptedLLM([_turn(answer)])
+    with caplog.at_level("INFO", logger=agent_module.logger.name):
+        result = (await _run(AgentEngine(llm, _deps())))[-1].result
+    assert result.answer == answer
+    assert len(llm.calls) == 1
+    [line] = _causal_lines(caplog)
+    assert line["frases"]
 
 
 async def test_la_causa_atribuida_va_al_log_aparte(
@@ -1737,7 +1776,7 @@ async def test_si_el_control_de_frases_causales_falla_la_respuesta_sale_igual(
         raise RuntimeError("roto")
 
     monkeypatch.setattr(agent_module, "scan_causal", _falla, raising=False)
-    llm = ScriptedLLM([_turn(NEUTRALIDAD_004)])
+    llm = ScriptedLLM([_ubicar(), _turn(NEUTRALIDAD_004)])
     with caplog.at_level("INFO", logger=agent_module.logger.name):
         result = (await _run(AgentEngine(llm, _deps())))[-1].result
     assert result.answer == NEUTRALIDAD_004
@@ -2439,3 +2478,217 @@ async def test_opcion_b_una_cita_textual_sin_cifra_propia_sale_de_las_fuentes(
         assert sesiones not in graficos
     else:
         assert sesiones in graficos
+
+
+# ── cifras sin haber leído nada (02-nov) ───────────────────
+
+_INVENTADA = "<respuesta>La inflación de agosto de 2026 fue de **3,0 %** mensual.</respuesta>"
+_CON_DATO = (
+    "<respuesta>La inflación de agosto de 2026 fue de **2,1 %** mensual, según el IPC "
+    "nacional.</respuesta>"
+)
+_SIN_LEER = "<respuesta>No leí ese dato en las fuentes, así que no te lo doy.</respuesta>"
+
+
+def _visible(events: list[Any]) -> str:
+    return "".join(e.content for e in events if isinstance(e, ChunkEvent))
+
+
+def _sin_evidencia_lines(caplog: pytest.LogCaptureFixture) -> list[dict[str, Any]]:
+    return [
+        json.loads(r.getMessage().removeprefix("answers.sin_evidencia "))
+        for r in caplog.records
+        if r.getMessage().startswith("answers.sin_evidencia ")
+    ]
+
+
+@pytest.mark.parametrize("mode", [None, "shadow", "correct"])
+async def test_sin_herramientas_y_con_cifras_hay_una_vuelta_que_termina_leyendo(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, mode: str | None
+) -> None:
+    """La reproducción del 02-nov: «Contame paso a paso cómo buscaste la
+    inflación…» recibió 3,0 % sin herramientas. La cifra inventada no llega a
+    la pantalla ni un instante, y con la vuelta se lee el dato."""
+    _modo(monkeypatch, mode)
+    llm = ScriptedLLM(
+        [
+            _turn(_INVENTADA),
+            _turn(calls=[_call("series_tiempo", 1, ids=["148.3_INIVELNAL_DICI_M_26"])]),
+            _turn(_CON_DATO),
+        ]
+    )
+    with caplog.at_level("INFO", logger=agent_module.logger.name):
+        events = await _run(AgentEngine(llm, _deps_series(IPC_MENSUAL)))
+    result = events[-1].result
+    assert "3,0 %" not in _visible(events)
+    assert "3,0 %" not in result.answer
+    assert "**2,1 %**" in result.answer
+    assert result.evidence == [IPC_MENSUAL]
+    assert result.no_data is False
+    # Al modelo le llegó qué cifra no leyó, con las herramientas disponibles.
+    assert len(llm.calls) == 3
+    assert llm.calls[1]["allow_tools"] is True
+    pedido = llm.calls[1]["messages"][-1]["content"]
+    assert "ninguna herramienta" in pedido
+    assert "3,0 %" in pedido
+    assert "<respuesta> y </respuesta>" in pedido
+    assert llm.calls[1]["messages"][-2]["role"] == "assistant"
+    [line] = _sin_evidencia_lines(caplog)
+    assert line["accion"] == "vuelta"
+    assert line["herramientas"] == 0
+    assert line["cifras"] == ["3,0 %"]
+
+
+async def test_si_la_vuelta_saca_la_cifra_sale_esa_respuesta(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    _modo(monkeypatch, None)
+    llm = ScriptedLLM([_turn(_INVENTADA), _turn(_SIN_LEER)])
+    with caplog.at_level("INFO", logger=agent_module.logger.name):
+        events = await _run(AgentEngine(llm, _deps()))
+    result = events[-1].result
+    assert result.answer == "No leí ese dato en las fuentes, así que no te lo doy."
+    assert _visible(events) == result.answer
+    assert not any(isinstance(e, ClearAnswerEvent) for e in events)
+    # Sin datos leídos no se cachea.
+    assert result.no_data is True
+    assert [line["accion"] for line in _sin_evidencia_lines(caplog)] == ["vuelta"]
+
+
+async def test_si_la_vuelta_insiste_con_la_cifra_no_se_publica(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    _modo(monkeypatch, None)
+    llm = ScriptedLLM([_turn(_INVENTADA), _turn(_INVENTADA)])
+    with caplog.at_level("INFO", logger=agent_module.logger.name):
+        events = await _run(AgentEngine(llm, _deps()))
+    result = events[-1].result
+    assert len(llm.calls) == 2  # una sola vuelta
+    assert result.answer == agent_module._UNREAD_ANSWER
+    assert _visible(events) == result.answer
+    assert result.no_data is True
+    assert [line["accion"] for line in _sin_evidencia_lines(caplog)] == ["vuelta", "bloqueada"]
+
+
+async def test_si_la_vuelta_busca_sin_leer_y_da_otra_cifra_tampoco_se_publica(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Una búsqueda no da evidencia: la cifra ya salió en streaming y se borra."""
+    _modo(monkeypatch, None)
+    llm = ScriptedLLM([_turn(_INVENTADA), _ubicar(), _turn(_INVENTADA)])
+    events = await _run(AgentEngine(llm, _deps()))
+    last = max(i for i, e in enumerate(events) if isinstance(e, ClearAnswerEvent))
+    assert _visible(events[last:]) == agent_module._UNREAD_ANSWER
+    assert events[-1].result.answer == agent_module._UNREAD_ANSWER
+
+
+async def test_sin_tiempo_para_la_vuelta_la_cifra_tampoco_se_publica(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _modo(monkeypatch, None)
+    # El reloj: arranque, primera vuelta del ciclo y la consulta de la vuelta,
+    # cuando ya pasaron 25 de los 30 s de /ask.
+    ticks = iter([0.0, 0.0, 25.0])
+    llm = ScriptedLLM([_turn(_INVENTADA)])
+    engine = AgentEngine(llm, _deps(), clock=lambda: next(ticks, 25.0))
+    events = await _run(engine, EngineRequest("q", "u", deadline_s=30))
+    assert len(llm.calls) == 1
+    assert "3,0 %" not in _visible(events)
+    assert events[-1].result.answer == agent_module._UNREAD_ANSWER
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        "No encontré datos de rating de televisión abierta en OpenArg.",
+        # Años, fechas y enteros chicos no son cifras de datos.
+        "El INDEC publica el IPC desde 2017, con base diciembre de 2016, y cubre 24 provincias.",
+        "La ley 27.275 es de 2016 y regula el acceso a la información pública.",
+    ],
+)
+async def test_sin_herramientas_y_sin_cifras_sale_tal_cual(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, answer: str
+) -> None:
+    _modo(monkeypatch, None)
+    llm = ScriptedLLM([_turn(f"<respuesta>{answer}</respuesta>")])
+    with caplog.at_level("INFO", logger=agent_module.logger.name):
+        events = await _run(AgentEngine(llm, _deps()))
+    assert len(llm.calls) == 1
+    assert events[-1].result.answer == answer
+    assert _visible(events) == answer
+    assert _sin_evidencia_lines(caplog) == []
+
+
+async def test_las_cifras_de_la_pregunta_y_del_historial_no_piden_otra_vuelta(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """«¿Y eso es mucho?»: contesta con lo que ya dijo. El signo no cuenta:
+    el historial dice «cayeron 1,7 %» y la respuesta también lo dice así."""
+    _modo(monkeypatch, None)
+    answer = "Cayeron 1,7 %, y sobre $ 30.000 millones es lo que ya te dije."
+    llm = ScriptedLLM([_turn(f"<respuesta>{answer}</respuesta>")])
+    req = EngineRequest(
+        question="¿Y sobre $ 30.000 millones?",
+        user_id="u",
+        history="Asistente: Las reservas cayeron 1,7 % en agosto de 2026.",
+    )
+    events = await _run(AgentEngine(llm, _deps()), req)
+    assert len(llm.calls) == 1
+    assert events[-1].result.answer == answer
+
+
+async def test_con_herramientas_y_sin_evidencia_las_cifras_solo_van_al_log(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Las búsquedas del catálogo redondean filas leídas («unas 62.000» por
+    61.887): en las baterías, 15 de 33 respuestas sin fuentes traen cifras así."""
+    _modo(monkeypatch, None)
+    answer = "Hay un padrón de escuelas de unas 62.000 filas."
+    llm = ScriptedLLM([_ubicar(), _turn(f"<respuesta>{answer}</respuesta>")])
+    with caplog.at_level("INFO", logger=agent_module.logger.name):
+        events = await _run(AgentEngine(llm, _deps()))
+    assert len(llm.calls) == 2
+    assert events[-1].result.answer == answer
+    assert answer in _visible(events)
+    [line] = _sin_evidencia_lines(caplog)
+    assert line["accion"] == "publicada"
+    assert line["herramientas"] == 1
+    assert line["cifras"] == ["62.000"]
+
+
+async def test_con_off_una_cifra_sin_herramientas_sale_en_streaming_como_antes(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """``off`` es el interruptor."""
+    _modo(monkeypatch, "off")
+    llm = ScriptedLLM([_turn(_INVENTADA)])
+    with caplog.at_level("INFO", logger=agent_module.logger.name):
+        events = await _run(AgentEngine(llm, _deps()))
+    assert len(llm.calls) == 1
+    assert "3,0 %" in events[-1].result.answer
+    assert "3,0 %" in _visible(events)
+    assert _sin_evidencia_lines(caplog) == []
+
+
+async def test_un_rechazo_del_modelo_no_pide_otra_vuelta(monkeypatch: pytest.MonkeyPatch) -> None:
+    _modo(monkeypatch, None)
+    llm = ScriptedLLM([_turn("Fue de 3,0 %.", stop="refusal")])
+    result = (await _run(AgentEngine(llm, _deps())))[-1].result
+    assert len(llm.calls) == 1
+    assert result.answer == agent_module._REFUSAL
+
+
+async def test_si_el_control_de_cifras_sin_leer_falla_la_respuesta_sale_igual(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    _modo(monkeypatch, None)
+
+    def _falla(answer: str, seen: Any) -> list[Any]:
+        raise RuntimeError("roto")
+
+    monkeypatch.setattr(agent_module, "figures_not_seen", _falla)
+    llm = ScriptedLLM([_turn(_INVENTADA)])
+    with caplog.at_level("INFO", logger=agent_module.logger.name):
+        result = (await _run(AgentEngine(llm, _deps())))[-1].result
+    assert "3,0 %" in result.answer
+    assert any("unread figures check failed" in r.getMessage() for r in caplog.records)

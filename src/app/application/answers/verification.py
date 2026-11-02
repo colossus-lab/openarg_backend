@@ -1250,6 +1250,34 @@ def correction_note(unsupported: Sequence[Figure]) -> str:
     )
 
 
+def figures_not_seen(answer: str, seen: frozenset[float] | set[float]) -> list[Figure]:
+    """Las cifras de ``answer`` que no figuran en ``seen``, con cualquier signo.
+
+    Para un turno sin evidencia, donde no hay contra qué verificar: ``seen``
+    es lo que el modelo tuvo a la vista (la pregunta, el historial, lo que
+    devolvieron las búsquedas). A diferencia de ``_in_context``, el signo no
+    cuenta: "cayó 1,7 %" sale tal cual del historial que dice "cayó 1,7 %".
+    """
+    return [
+        fig
+        for fig in extract_figures(answer)
+        if not any(_key(b) in seen or _key(b * fig.multiplier) in seen for b, _ in fig.readings)
+    ]
+
+
+def no_evidence_note(figures: Sequence[Figure]) -> str:
+    """El pedido cuando el modelo contestó con cifras sin usar ninguna herramienta."""
+    listed = "; ".join(_listed(figures))
+    return (
+        "En este turno no usaste ninguna herramienta y estas cifras no salen de nada que "
+        f"hayas leído: {listed}. Un dato no se da de memoria. Si son datos, buscalos con las "
+        "herramientas y respondé con lo que devuelvan. Si no los vas a buscar, reescribí la "
+        "respuesta completa sin esas cifras y decí que no las leíste en las fuentes. No "
+        "menciones esta revisión. La respuesta nueva va entera entre <respuesta> y "
+        "</respuesta>, que es lo único que se publica."
+    )
+
+
 def unverified_notice(unsupported: Sequence[Figure]) -> str:
     """El aviso que va arriba si, después de la vuelta correctiva, quedan cifras sin respaldo."""
     listed = ", ".join(_listed(unsupported))
