@@ -377,9 +377,13 @@ _LEAK_RE = re.compile("|".join(_LEAK_PATTERNS), re.IGNORECASE)
 
 # Nombres internos de tablas. Sólo aviso: el agente puede citar la tabla, pero
 # el usuario tendría que leer el título del dataset, no
-# `raw.datos_gob_ar__estudio_nacional_sobre_el_perfil_de__08ca74a9__v1`.
+# `raw.datos_gob_ar__estudio_nacional_sobre_el_perfil_de__08ca74a9__v1`, ni
+# `raw."..."`, ni el nombre sin esquema y sin versión: `portal__titulo__...`.
 _IDENTIFIER_RE = re.compile(
-    r"\b(?:raw|mart|staging)\.[a-z_][a-z0-9_]{3,}|\bcache_[a-z0-9_]{4,}|__v\d+\b",
+    r'\b(?:raw|mart|staging)"?\."?[a-z_][a-z0-9_]{3,}'
+    r"|\bcache_[a-z0-9_]{4,}"
+    r"|__v\d+\b"
+    r"|(?<![\w./=-])[a-z0-9]+(?:_[a-z0-9]+)*__[a-z0-9]",
     re.IGNORECASE,
 )
 

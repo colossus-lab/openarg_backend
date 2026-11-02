@@ -11,6 +11,7 @@ from typing import Any
 from langgraph.config import get_stream_writer
 
 import app.application.pipeline.nodes as nodes_pkg
+from app.application.catalog.physical_namer import MAX_TABLE_NAME_LENGTH
 from app.application.pipeline.chart_builder import (
     adopt_llm_titles,
     build_deterministic_charts,
@@ -158,11 +159,59 @@ _RE_INTERNAL_CITATION = re.compile(
 _RE_CODE_TABLE_IDENTIFIER = re.compile(r"`(?:(?:mart|raw)\.)?([a-z0-9]+(?:_[a-z0-9]+){2,})`")
 _RE_QUALIFIED_TABLE = re.compile(r"\b(?:mart|raw)\.([a-z0-9]+(?:_[a-z0-9]+)+)\b")
 
+# Nombres físicos de la capa raw, `<portal>__<título>__<hash>__v<N>`
+# (`catalog/physical_namer.py`), con o sin esquema y comillas, o con el final
+# recortado por el modelo (`raw.portal__titulo__...`). En la batería del 02-nov
+# se publicaron como "**Egresos hospitalarios** (`raw.buenos_aires_prov__...`)".
+# De todo el nombre sólo el título se puede leer. Citado solo entre paréntesis
+# no agrega nada y se borra; en cualquier otro lugar ocupa el lugar de un
+# sustantivo en la frase, así que queda el título.
+# No toca URLs, rutas ni nombres de archivo que tengan `__`.
+_TABLE_SLUG = r"[a-z0-9]+(?:_[a-z0-9]+)*"
+_RAW_TABLE_NAME = (
+    r'(?<![\w./=-])`?"?(?:(?:raw|mart|staging)"?\."?)?'
+    rf"(?P<name>{_TABLE_SLUG}(?:__{_TABLE_SLUG})+)"
+    r'(?P<cut>_*(?:\.{2,}|…|\*)|_+)?"?`?'
+    r"(?![\w/-]|\.(?:csv|json|pdf|txt|xlsx?|zip)\b)"
+)
+_RE_RAW_TABLE = re.compile(_RAW_TABLE_NAME)
+_RE_RAW_TABLE_CITATION = re.compile(r"[ \t]*[\(\[]\s*" + _RAW_TABLE_NAME + r"\s*[\)\]](?!\()")
+_RE_RAW_TABLE_SUFFIX = re.compile(r"[0-9a-f]{8}|v\d+")
+# Hasta acá llega `<portal>__<título>` cuando el namer tuvo que recortar el
+# título: lo que deja MAX_TABLE_NAME_LENGTH sin `__<hash>__v999`, menos el `_`
+# que le saca al recortar.
+_RAW_TABLE_STEM_CUT_AT = MAX_TABLE_NAME_LENGTH - len("__12345678__v999") - 1
+# Palabras con las que un título recortado no puede terminar.
+_TITLE_DANGLING_WORDS = frozenset(
+    "a al con de del e el en la las lo los o para por que sin sobre u un una y".split()
+)
+
+
+def _read_raw_table(match: re.Match[str]) -> str:
+    parts = [p for p in match.group("name").split("__") if not _RE_RAW_TABLE_SUFFIX.fullmatch(p)]
+    title = (parts[1:] or parts or [""])[0]
+    # Un título que empieza con un número lleva `t_`: Postgres no admite otra cosa.
+    words = re.sub(r"^t_(?=\d)", "", title).split("_")
+
+    cut = match.group("cut") or ""
+    cut_mid_word = bool(cut) and not cut.startswith("_")
+    if cut_mid_word or len("__".join(parts[:2])) >= _RAW_TABLE_STEM_CUT_AT:
+        # "red_de_establecimientos_que_ga" era "...que garantizan": se saca lo
+        # que quedó a medias y el conector que queda colgando.
+        words = words[:-1] or words
+        while len(words) > 1 and words[-1] in _TITLE_DANGLING_WORDS:
+            words.pop()
+    return " ".join(words)
+
 
 def _humanize_table_identifiers(text: str) -> str:
     def _words(match: re.Match[str]) -> str:
         return match.group(1).replace("_", " ")
 
+    # Los de doble guion bajo, primero: `_RE_CODE_TABLE_IDENTIFIER` no los
+    # reconoce y `_RE_QUALIFIED_TABLE` podría tomar un pedazo.
+    text = _RE_RAW_TABLE_CITATION.sub("", text)
+    text = _RE_RAW_TABLE.sub(_read_raw_table, text)
     text = _RE_CODE_TABLE_IDENTIFIER.sub(_words, text)
     return _RE_QUALIFIED_TABLE.sub(_words, text)
 

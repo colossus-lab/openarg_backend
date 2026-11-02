@@ -105,6 +105,27 @@ def test_un_nombre_de_tabla_interno_es_aviso() -> None:
     assert not leaked_identifiers("según el Estudio Nacional sobre el Perfil (INDEC, 2018)")
 
 
+@pytest.mark.parametrize(
+    "texto",
+    [
+        "según raw.buenos_aires_prov__red_de_establecimientos_que_ga__...",
+        "según buenos_aires_prov__red_de_establecimientos_que_ga__...",
+        'según raw."buenos_aires_prov__egresos_hospitalarios__dbcccf6f"',
+        "según buenos_aires_prov__egresos_hospitalarios__dbcccf6f",
+    ],
+)
+def test_un_nombre_de_tabla_recortado_o_sin_esquema_tambien_es_aviso(texto: str) -> None:
+    assert leaked_identifiers(texto)
+
+
+@pytest.mark.parametrize(
+    "texto",
+    ["https://datos.gob.ar/dataset/foo__bar", "el campo __filas_total", "una tasa_call"],
+)
+def test_no_avisa_de_lo_que_no_es_un_nombre_de_tabla(texto: str) -> None:
+    assert not leaked_identifiers(texto)
+
+
 # ── fuentes por tipo, no por título ────────────────────────
 
 

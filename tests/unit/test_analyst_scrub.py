@@ -18,6 +18,7 @@ from app.application.pipeline.nodes.analyst import (
     _drop_apologetic_preface,
     _scrub_internal_identifiers,
 )
+from tests.evaluation.quality_checks import leaked_identifiers
 
 # ── _scrub_internal_identifiers ───────────────────────────────────
 
@@ -140,6 +141,107 @@ def test_scrub_does_not_overmatch_partial_substring() -> None:
     scrubbed = _scrub_internal_identifiers(answer)
     assert "apicultor" in scrubbed
     assert "api_eros" in scrubbed
+
+
+# ── Nombres de la capa raw: <portal>__<título>__<hash>__v<N> ──────
+
+# Los dos que publicó ckan_003 en la batería de staging del 02-nov.
+EGRESOS = "raw.buenos_aires_prov__egresos_hospitalarios__dbcccf6f__v1"
+RED_RECORTADA = "raw.buenos_aires_prov__red_de_establecimientos_que_ga__..."
+
+
+def test_scrub_borra_los_dos_nombres_de_ckan_003_sin_romper_el_titulo() -> None:
+    answer = (
+        f"**3. Red de establecimientos IVE/ILE** (`{RED_RECORTADA}`)\n"
+        "Hospitales y centros de la Provincia. (~617 registros)\n\n"
+        f"**4. Egresos hospitalarios 2021–2022** (`{EGRESOS}`)\n"
+        "Egresos por año y región. (~388.000 registros)\n"
+    )
+    assert _scrub_internal_identifiers(answer) == (
+        "**3. Red de establecimientos IVE/ILE**\n"
+        "Hospitales y centros de la Provincia. (~617 registros)\n\n"
+        "**4. Egresos hospitalarios 2021–2022**\n"
+        "Egresos por año y región. (~388.000 registros)\n"
+    )
+
+
+@pytest.mark.parametrize(
+    ("citado", "leido"),
+    [
+        (f"`{EGRESOS}`", "egresos hospitalarios"),
+        (EGRESOS, "egresos hospitalarios"),
+        ("buenos_aires_prov__egresos_hospitalarios__dbcccf6f__v1", "egresos hospitalarios"),
+        ("`buenos_aires_prov__egresos_hospitalarios__dbcccf6f__v12`", "egresos hospitalarios"),
+        ('raw."buenos_aires_prov__egresos_hospitalarios__dbcccf6f__v1"', "egresos hospitalarios"),
+        ('"raw"."buenos_aires_prov__egresos_hospitalarios__dbcccf6f__v1"', "egresos hospitalarios"),
+        ("`raw.buenos_aires_prov__egresos_hospitalarios__...`", "egresos hospitalarios"),
+        ("raw.buenos_aires_prov__egresos_hospitalarios__…", "egresos hospitalarios"),
+        ("`raw.buenos_aires_prov__egresos_hospitalarios__*`", "egresos hospitalarios"),
+        ("`raw.buenos_aires_prov__egresos_hospitalarios__`", "egresos hospitalarios"),
+        # Cortado por el modelo en medio de una palabra.
+        ("`raw.buenos_aires_prov__egresos_hospita...`", "egresos"),
+        # Cortado por el namer: los 63 caracteres no alcanzan para el título.
+        (f"`{RED_RECORTADA}`", "red de establecimientos"),
+        ("raw.datos_gob_ar__estudio_nacional_sobre_el_perfil_de__08ca74a9__v1", None),
+        # Un título que empieza con un número lleva `t_`.
+        ("`raw.caba__t_2023_viajes_en_subte__4e140173__v10`", "2023 viajes en subte"),
+        ("staging.presupuesto__presupuesto_abierto", "presupuesto abierto"),
+    ],
+)
+def test_scrub_lee_el_titulo_del_nombre_en_medio_de_la_frase(
+    citado: str, leido: str | None
+) -> None:
+    leido = leido or "estudio nacional sobre el perfil"
+    scrubbed = _scrub_internal_identifiers(f"Según {citado}, hay 42 registros.")
+    assert scrubbed == f"Según {leido}, hay 42 registros."
+
+
+@pytest.mark.parametrize(
+    ("antes", "despues"),
+    [
+        (f"Egresos (`{EGRESOS}`), con 42 registros.", "Egresos, con 42 registros."),
+        (f"Egresos [{EGRESOS}].", "Egresos."),
+        (f"Egresos ( {EGRESOS} ).", "Egresos."),
+        # Con algo más adentro se conserva lo que dice el paréntesis.
+        (f"Egresos (`{EGRESOS}`, 42 filas).", "Egresos (egresos hospitalarios, 42 filas)."),
+        (f"Egresos (Fuente: {EGRESOS}).", "Egresos (Fuente: egresos hospitalarios)."),
+        # El texto de un enlace no es una cita: el enlace sigue funcionando.
+        (f"Ver [{EGRESOS}](https://x.org).", "Ver [egresos hospitalarios](https://x.org)."),
+    ],
+)
+def test_scrub_borra_la_cita_sola_entre_parentesis(antes: str, despues: str) -> None:
+    assert _scrub_internal_identifiers(antes) == despues
+
+
+@pytest.mark.parametrize(
+    "texto",
+    [
+        "https://datos.gob.ar/dataset/foo__bar_baz",
+        "descargá reporte__2024.csv desde el portal",
+        "la ruta /datos/foo__bar",
+        "el campo __filas_total",
+        "una palabra_con_guiones y `tasa_call`",
+    ],
+)
+def test_scrub_no_toca_lo_que_no_es_un_nombre_de_tabla(texto: str) -> None:
+    assert _scrub_internal_identifiers(texto) == texto
+
+
+@pytest.mark.parametrize(
+    "citado",
+    [
+        EGRESOS,
+        RED_RECORTADA,
+        f"`{EGRESOS}`",
+        "buenos_aires_prov__red_de_establecimientos_que_ga__...",
+        "buenos_aires_prov__egresos_hospitalarios__dbcccf6f",
+        'raw."buenos_aires_prov__egresos_hospitalarios__dbcccf6f__v1"',
+    ],
+)
+def test_lo_que_detecta_la_bateria_no_sobrevive_a_la_limpieza(citado: str) -> None:
+    for answer in (f"Según {citado}, hay 42.", f"Egresos ({citado}), con 42."):
+        assert leaked_identifiers(answer), "el detector de la batería tiene que verlo"
+        assert leaked_identifiers(_scrub_internal_identifiers(answer)) == []
 
 
 # ── _drop_apologetic_preface ──────────────────────────────────────
