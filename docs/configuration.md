@@ -169,7 +169,7 @@ These override TOML settings or are read directly by the code. Names only. The t
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `ANSWERS_ENGINE` | `legacy` (LangGraph graph) or `agent` (tool-using agent). Read on every turn; an unknown value logs `ERROR` and uses `legacy` | `legacy` |
-| `ANSWERS_VERIFY_MODE` | Figure verifier: `off`, `shadow` (log only) or `correct` (cite only what was used, one corrective round, notice for unbacked figures) | `shadow` |
+| `ANSWERS_VERIFY_MODE` | Figure verifier: `off`, `shadow` (log only, except that an answer with figures and no tool call is never published) or `correct` (cite only what was used, one corrective round, notice for unbacked figures) | `shadow` |
 | `AWS_REGION` | AWS region for Bedrock and S3 | `us-east-1` |
 | `BEDROCK_AGENT_MODEL` | Agent model | `us.anthropic.claude-sonnet-4-6` |
 | `BEDROCK_LLM_MODEL` | Legacy engine and worker LLM tasks | `us.anthropic.claude-haiku-4-5-20251001-v1:0` |

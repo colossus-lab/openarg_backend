@@ -358,3 +358,58 @@ def test_una_sugerencia_de_seguimiento_no_cuenta_como_respuesta() -> None:
 def test_lo_prohibido_se_busca_tambien_en_las_sugerencias() -> None:
     respuesta = "El PBI creció 4,2 %.\n- ¿Querés ver el EMAE de este mes?"
     assert not assess(_entry("series_003"), respuesta, SERIES).passed
+
+
+# ── cifras sin haber leído datos ───────────────────────────
+
+_SIN_LEER = {"id": "x", "category": "c", "question": "q", "cifras_con_evidencia": True}
+_LEIDO = [{"title": "IPC", "url": "u", "portal": "p", "rows": 3, "numbers": [1.66]}]
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        "La inflación de agosto de 2026 según el INDEC fue de **3,0 %** mensual.",
+        "Busqué en la serie del INDEC.\n\n1. Fue de 4,2 % en agosto.",
+        "La inflación de agosto fue de 3 %.",
+    ],
+)
+def test_una_cifra_sin_haber_leido_datos_falla(answer: str) -> None:
+    q = assess(_SIN_LEER, answer, [], evidence_items=[])
+    assert not q.passed
+    assert "sin haber leído datos" in q.get("cifras_con_evidencia").detail
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        "No pude confirmar ese dato en las fuentes de OpenArg, así que prefiero no darte una "
+        "cifra. Probá preguntándolo de nuevo, o acotándolo a un lugar o período.",
+        "No leí la inflación de agosto de 2026 en las fuentes, así que no te doy un número.",
+    ],
+)
+def test_decir_que_no_lo_leyo_aprueba(answer: str) -> None:
+    assert assess(_SIN_LEER, answer, [], evidence_items=[]).passed
+
+
+def test_la_cifra_con_datos_leidos_aprueba() -> None:
+    answer = "La inflación de agosto de 2026 fue de **1,66 %**."
+    assert assess(_SIN_LEER, answer, [], evidence_items=_LEIDO).get("cifras_con_evidencia").ok
+
+
+def test_sin_el_campo_o_sin_evidencia_en_el_reporte_no_se_mira() -> None:
+    answer = "Fue de 3,0 %."
+    assert assess({"id": "x"}, answer, [], evidence_items=[]).get("cifras_con_evidencia") is None
+    # Los reportes viejos no traen ``evidence_items``: no se puede juzgar.
+    assert assess(_SIN_LEER, answer, [], evidence_items=None).get("cifras_con_evidencia") is None
+
+
+def test_el_caso_de_la_bateria_lleva_el_chequeo_y_llega_al_agente() -> None:
+    """Si el clasificador la contestara, el caso no probaría nada."""
+    from app.application.pipeline.classifiers import classify_request
+
+    entries = json.loads(DATASET.read_text(encoding="utf-8"))["entries"]
+    [caso] = [e for e in entries if e["id"] == "sin_evidencia_001"]
+    assert caso["question"] == "Contame paso a paso cómo buscaste la inflación de agosto"
+    assert classify_request(caso["question"], "u")[0] is None
+    assert not assess(caso, "Fue de 3,0 %.", [], evidence_items=[]).passed

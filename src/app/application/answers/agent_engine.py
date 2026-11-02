@@ -26,7 +26,20 @@ Cada turno:
 6. salvo con ``off``, las frases causales de la respuesta («generó»,
    «debido a»…), propias y atribuidas, van al log ``answers.causal``
    (``answers.neutrality``; es una cota inferior). Nunca cambian la
-   respuesta, tampoco con ``correct``.
+   respuesta, tampoco con ``correct``;
+7. salvo con ``off``, una respuesta con cifras sin haber usado ninguna
+   herramienta no se publica, con ``shadow`` también. No hay evidencia contra la
+   cual verificar, y no es una falsa alarma como un truncado: «La inflación
+   de agosto fue de 3,0 %», sin leer nada, con 1,66 % en la serie (02-nov, una
+   pregunta que distrae del dato). El turno sin herramientas no sale en
+   streaming: sale entero cuando se sabe que se puede publicar. Si trae cifras
+   que no están en la pregunta ni en el historial, el modelo hace UNA vuelta
+   más, con herramientas (``no_evidence_note``); si sigue sin leer y con
+   cifras, o no hay tiempo para la vuelta, sale ``_UNREAD_ANSWER``. Con
+   herramientas y sin evidencia (las búsquedas del catálogo) sólo va al log
+   ``answers.sin_evidencia``: esas respuestas dan cantidades de filas que no
+   siempre coinciden con lo leído (ckan_001: 62.000 en una corrida, 61.887 en
+   otra), y una búsqueda sí les da de dónde salir.
 
 Sólo con ``correct`` el verificador decide además qué se cita: las fuentes,
 los gráficos, el mapa, `served_table`, las citas estructuradas y la evidencia
@@ -55,6 +68,7 @@ import logging
 import re
 import time
 from collections.abc import AsyncGenerator
+from dataclasses import replace
 from typing import Any
 
 from app.application.answers.engine import (
@@ -90,6 +104,7 @@ from app.application.answers.verification import (
     VERIFY_CORRECT,
     VERIFY_OFF,
     VERIFY_SHADOW,
+    Figure,
     Verification,
     build_citations,
     claim_for,
@@ -97,6 +112,8 @@ from app.application.answers.verification import (
     correction_note,
     dated_evidence,
     figure_evidence,
+    figures_not_seen,
+    no_evidence_note,
     seen_numbers,
     select_evidence,
     unverified_notice,
@@ -131,6 +148,10 @@ _NO_ANSWER = (
     "acotándola a un lugar o período."
 )
 _REFUSAL = "No puedo ayudarte con esa consulta. Preguntame por datos públicos de Argentina."
+_UNREAD_ANSWER = (
+    "No pude confirmar ese dato en las fuentes de OpenArg, así que prefiero no darte una "
+    "cifra. Probá preguntándolo de nuevo, o acotándolo a un lugar o período."
+)
 
 
 class _Unchecked:
@@ -382,6 +403,10 @@ class AgentEngine:
         # El texto que ya se verificó en el bucle (modo correct) y su resultado:
         # si es la respuesta final, no se verifica dos veces.
         checked: tuple[str, Verification | None, float] | None = None
+        # Lo que el modelo tuvo a la vista sin usar herramientas, y si ya se le
+        # pidió la vuelta por contestar con cifras sin haber leído nada.
+        asked = seen_numbers(messages[0]["content"])
+        unread_round = False
 
         while True:
             out_of_budget = calls_made >= max_calls or (self._clock() - started) > time_budget
@@ -391,6 +416,8 @@ class AgentEngine:
             tags = _AnswerTags()
             cleaner = _ChunkCleaner()
             streamed = False
+            # Sin herramientas todavía, nada sale hasta saber si se puede publicar.
+            hold = mode != VERIFY_OFF and calls_made == 0
             turn: AgentTurn | None = None
             yield StatusEvent(STEP_THINKING, THINKING_TEXT)
             async for item in self._llm.stream_turn(
@@ -402,7 +429,7 @@ class AgentEngine:
             ):
                 if isinstance(item, TextDelta):
                     text = cleaner.feed(tags.feed(item.text))
-                    if text:
+                    if text and not hold:
                         # Un espacio suelto antes de pedir herramientas no es
                         # el comienzo de la respuesta.
                         if text.strip() and not streamed:
@@ -425,9 +452,35 @@ class AgentEngine:
                         turn.stop_reason,
                         first_check is not None,
                     )
-                if tail:
+                if tail and not hold:
                     streamed = streamed or bool(tail.strip())
                     yield ChunkEvent(tail)
+                if mode != VERIFY_OFF and not evidence and turn.stop_reason != "refusal":
+                    unread = _unread_figures(_answer_of(turn)[0], context_seen | asked)
+                    if (
+                        unread
+                        and calls_made == 0
+                        and not unread_round
+                        and not out_of_budget
+                        and self._can_correct(req, started)
+                    ):
+                        unread_round = True
+                        _no_evidence_log(mode, unread, calls_made, "vuelta")
+                        yield StatusEvent(STEP_THINKING, CHECKING_TEXT)
+                        messages.append({"role": "assistant", "content": turn.content})
+                        messages.append({"role": "user", "content": no_evidence_note(unread)})
+                        continue
+                    # Después de la vuelta, las búsquedas tampoco respaldan una
+                    # cifra que no devolvieron.
+                    blocked = bool(unread) and (calls_made == 0 or unread_round)
+                    _no_evidence_log(
+                        mode, unread, calls_made, "bloqueada" if blocked else "publicada"
+                    )
+                    if blocked:
+                        if streamed:
+                            yield ClearAnswerEvent()
+                            streamed = False
+                        turn = replace(turn, text=_UNREAD_ANSWER)
                 # Una sola vuelta correctiva, y sólo si el modelo terminó bien
                 # (no cortado por largo ni negándose) y queda tiempo.
                 if (
@@ -686,6 +739,39 @@ def _safe_verify(
     except Exception:
         logger.warning("agent: figure verification failed", exc_info=True)
         return None
+
+
+def _unread_figures(answer: str, seen: set[float]) -> list[Figure]:
+    """Las cifras de un turno sin evidencia que el modelo no tuvo a la vista.
+
+    Como la verificación, nunca le cuesta la respuesta a nadie.
+    """
+    try:
+        return figures_not_seen(answer, seen)
+    except Exception:
+        logger.warning("agent: unread figures check failed", exc_info=True)
+        return []
+
+
+def _no_evidence_log(mode: str, unread: list[Figure], calls: int, action: str) -> None:
+    """Una respuesta sin evidencia con cifras no leídas (``answers.sin_evidencia``).
+
+    ``accion``: «vuelta» (se le pidió otra vuelta), «bloqueada» (no se publicó)
+    o «publicada» (usó herramientas: las búsquedas pueden redondear lo leído).
+    """
+    if unread:
+        logger.info(
+            "answers.sin_evidencia %s",
+            json.dumps(
+                {
+                    "modo": mode,
+                    "accion": action,
+                    "herramientas": calls,
+                    "cifras": [f.raw for f in unread[:8]],
+                },
+                ensure_ascii=False,
+            ),
+        )
 
 
 async def _verify_off_loop(

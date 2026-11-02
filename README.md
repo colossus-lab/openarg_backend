@@ -133,6 +133,8 @@ After the agent answers, every figure in the text is looked up in what the tools
 
 Except with `off`, causal phrases ("generó", "debido a"…) are logged to `answers.causal` (`answers/neutrality.py`); they never change the answer.
 
+Also except with `off`, `shadow` included, an answer with figures and no tool call is not published: there is no evidence to check it against. Such a turn is not streamed; the agent gets **one** round with tools (`answers/verification.py: no_evidence_note`), and if it still has unread figures, a fixed "could not confirm" answer goes out instead. Figures in the question or the history do not count. Answers that used tools and read no data (catalogue searches) are only logged to `answers.sin_evidencia`.
+
 ### Stale-data notice (agent engine)
 
 For an engine that does not handle the cross-cutting work itself (`handles_cross_cutting = False`, today only the agent), `EngineRunner` puts at most two notices **at the top of the answer text** when the cited evidence's last observation is late for its frequency, or the source itself says the series is no longer updated (`quality/data_age.py`). Questions that name a closed period ("first half of 2026") do not trigger it. Because it is in the text, `/ask`, the MCP and the web chat all show it. For a catalogue table, which carries no date of its last observation, it adds to `warnings` when OpenArg last read it.

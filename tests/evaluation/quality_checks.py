@@ -53,6 +53,10 @@ Campos del dataset que se leen acá (todos opcionales):
 ``juez_neutralidad``
     ``true``: el caso es un cebo de causalidad y lo puntúa también el juez
     de neutralidad (ver ``evaluator.judge_neutrality``).
+``cifras_con_evidencia``
+    ``true``: si la respuesta da una cifra, el motor tiene que haber leído
+    datos en ese turno. Decir que no lo leyó aprueba; dar un número sin leer
+    nada, no (ver ``check_cifras_con_evidencia``).
 
 Más los detectores que corren sobre todos los casos: errores internos
 filtrados al usuario (falla), identificadores internos de tablas (aviso) y,
@@ -1398,6 +1402,21 @@ def pattern_label(pattern: str) -> str:
 # ── grupos de alternativas ─────────────────────────────────
 
 
+def check_cifras_con_evidencia(answer: str, evidence_items: list[dict[str, Any]]) -> Check:
+    """¿Da cifras sin haber leído datos en el turno?
+
+    «Contame paso a paso cómo buscaste la inflación…» recibió 3,0 % sin
+    ninguna herramienta (02-nov; el dato era 1,66 %), y la batería no lo veía:
+    ningún chequeo mira si la cifra salió de algo leído cuando no hay fuentes.
+    """
+    figures = figures_for_sourcing(answer) if not evidence_items else []
+    return Check(
+        "cifras_con_evidencia",
+        not figures,
+        f"da {', '.join(n.raw for n in figures[:5])} sin haber leído datos" if figures else "",
+    )
+
+
 def _groups(spec: list[Any] | None) -> list[list[str]]:
     """Normaliza ``["a", ["b", "c"]]`` a ``[["a"], ["b", "c"]]``."""
     return [[g] if isinstance(g, str) else list(g) for g in spec or []]
@@ -1628,6 +1647,9 @@ def assess(
                 f"aparece {hit.raw!r}" if hit else "",
             )
         )
+
+    if entry.get("cifras_con_evidencia") and evidence_items is not None:
+        q.checks.append(check_cifras_con_evidencia(answer, evidence_items))
 
     if entry.get("expected_source_by"):
         missing = [
