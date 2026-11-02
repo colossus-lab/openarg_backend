@@ -161,6 +161,115 @@ MAX_ROWS = 500_000
 MAX_DOWNLOAD_BYTES = 500 * 1024 * 1024
 
 
+# Long enough for a refresh dispatched mid-ingest by `register_via_b_table` to
+# release the mart's advisory lock; the one sent at the end would otherwise
+# return `skipped_locked` and leave the mart holding only the first sheets.
+_FINAL_MART_REFRESH_DELAY_SECONDS = 120
+
+_DEPENDENT_MATVIEWS_SQL = text(
+    """
+    SELECT DISTINCT dependent.relname
+    FROM pg_depend d
+    JOIN pg_rewrite r       ON r.oid = d.objid
+    JOIN pg_class dependent ON dependent.oid = r.ev_class
+    JOIN pg_class src       ON src.oid = d.refobjid
+    JOIN pg_namespace ns    ON ns.oid = src.relnamespace
+    WHERE d.classid = 'pg_rewrite'::regclass
+      AND d.refclassid = 'pg_class'::regclass
+      AND dependent.relkind = 'm'
+      AND dependent.oid <> src.oid
+      AND ns.nspname = 'raw'
+      AND src.relname = ANY(:tables)
+    """
+)
+
+
+def _blocked_by_dependents(exc: Exception) -> bool:
+    """Postgres refused the DROP because a view reads the table (SQLSTATE 2BP01)."""
+    return getattr(
+        getattr(exc, "orig", None), "sqlstate", None
+    ) == "2BP01" or "depend on it" in str(exc)
+
+
+def _reload_in_place(engine, df: pd.DataFrame, table_name: str) -> None:
+    """Swap a table's rows without dropping it, or leave it exactly as it was.
+
+    One transaction, and DELETE rather than TRUNCATE: readers keep seeing the
+    old rows until the commit instead of queueing behind an exclusive lock, and
+    a load that fails midway rolls back to the previous month's data.
+
+    Only the rows can change this way. A column the file gained or lost needs a
+    new table, which the view on top forbids, so that case is refused by name
+    rather than left to fail, or to fill a column with NULLs, on the way in.
+    """
+    with engine.begin() as conn:
+        current = {
+            r[0]
+            for r in conn.execute(
+                text(
+                    "SELECT column_name FROM information_schema.columns "
+                    "WHERE table_schema = 'raw' AND table_name = :t"
+                ),
+                {"t": table_name},
+            )
+        }
+        incoming = {str(c) for c in df.columns}
+        if incoming != current:
+            raise ValueError(
+                f"raw.{table_name} has a view on it and its columns changed: "
+                f"new {sorted(incoming - current)}, gone {sorted(current - incoming)}"
+            )
+        conn.execute(text(f'DELETE FROM raw."{table_name}"'))  # noqa: S608
+        df.to_sql(table_name, conn, schema="raw", if_exists="append", index=False)
+
+
+def _store_sheet(engine, df: pd.DataFrame, table_name: str) -> bool:
+    """Write a sheet to `raw`. True when it had to be reloaded in place.
+
+    `to_sql(replace)` is a DROP without CASCADE, so Postgres refuses it for a
+    table a materialized view reads. `mart.inflacion_argentina` reads three of
+    the IPC sheets: every monthly ingest failed on the first of them and the
+    IPC stayed frozen, with the file already at September and the tables at
+    March.
+    """
+    try:
+        df.to_sql(table_name, engine, schema="raw", if_exists="replace", index=False)
+        return False
+    except Exception as exc:
+        if not _blocked_by_dependents(exc):
+            raise
+    logger.info("INDEC %s: a view reads this table, reloading its rows in place", table_name)
+    _reload_in_place(engine, df, table_name)
+    return True
+
+
+def _refresh_marts_reading(engine, tables: list[str]) -> list[str]:
+    """Refresh once, after the last sheet, the marts reading tables reloaded in place.
+
+    A matview keeps its old rows until refreshed, and the refresh each sheet
+    triggers through `register_via_b_table` does not settle it: deduplicated in
+    a 110-second window, it can run after the first sheet of three and be the
+    only one that does.
+    """
+    from app.application.marts.mart import load_all_marts
+    from app.infrastructure.celery.tasks.mart_tasks import _DEFAULT_MARTS_DIR, refresh_mart
+
+    with engine.connect() as conn:
+        views = {
+            r[0] for r in conn.execute(_DEPENDENT_MATVIEWS_SQL, {"tables": sorted(set(tables))})
+        }
+        conn.rollback()
+    mart_ids = [m.id for m in load_all_marts(_DEFAULT_MARTS_DIR) if m.view_name in views]
+    stamp = int(time.time())
+    for mart_id in mart_ids:
+        refresh_mart.apply_async(
+            args=[mart_id],
+            countdown=_FINAL_MART_REFRESH_DELAY_SECONDS,
+            task_id=f"refresh_mart:ingest_indec:{mart_id}:{stamp}",
+        )
+    return mart_ids
+
+
 def _sanitize_table_name(topic: str) -> str:
     clean = re.sub(r"[^a-z0-9_]", "_", topic.lower())
     clean = re.sub(r"_+", "_", clean).strip("_")
@@ -627,6 +736,7 @@ def ingest_indec(self):
     """
     engine = get_sync_engine()
     results = {"ingested": 0, "skipped": 0, "errors": 0}
+    reloaded_in_place: list[str] = []
 
     try:
         for ds_info in INDEC_DATASETS:
@@ -653,7 +763,8 @@ def ingest_indec(self):
                     if len(df) > MAX_ROWS:
                         df = df.head(MAX_ROWS)
 
-                    df.to_sql(table_name, engine, schema="raw", if_exists="replace", index=False)
+                    if _store_sheet(engine, df, table_name):
+                        reloaded_in_place.append(table_name)
 
                     sheet_info = {
                         **ds_info,
@@ -697,6 +808,10 @@ def ingest_indec(self):
             except Exception:
                 results["errors"] += 1
                 logger.warning("Failed to ingest INDEC %s", ds_info["id"], exc_info=True)
+
+        if reloaded_in_place:
+            results["reloaded_in_place"] = reloaded_in_place
+            results["marts_refreshing"] = _refresh_marts_reading(engine, reloaded_in_place)
 
         return results
 
