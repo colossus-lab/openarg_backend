@@ -225,6 +225,29 @@ def test_el_colector_no_pisa_las_hojas(base, libro_servido):
         assert _primer_valor(base, tabla) == _NIVEL_GENERAL[hoja], hoja
 
 
+def test_la_edicion_nueva_cambia_el_link_de_los_datasets_que_ya_estaban(
+    base, libro_servido, monkeypatch
+):
+    """El link de la fuente tiene que bajar el archivo del que salieron los datos.
+
+    Medido en staging el 02-nov-2026: los datos del 1er semestre de 2026 citaban
+    `cuadros_informe_pobreza_09_25.xls`, que no los tiene.
+    """
+    indec_tasks.ingest_indec.run()
+    edicion_nueva = _URL.replace("zz_aperturas", "zz_aperturas_09_26")
+    monkeypatch.setattr(indec_tasks, "INDEC_DATASETS", [{**_DATASET, "url": edicion_nueva}])
+
+    assert indec_tasks.ingest_indec.run()["errors"] == 0
+
+    with base.connect() as conn:
+        filas = conn.execute(
+            text("SELECT url, download_url FROM datasets WHERE CAST(id AS text) = ANY(:ids)"),
+            {"ids": _datasets_de_prueba(base)},
+        ).all()
+    assert len(filas) == 3
+    assert {tuple(f) for f in filas} == {(edicion_nueva, edicion_nueva)}
+
+
 def test_sin_la_guarda_el_colector_guarda_la_primera_hoja_en_todas(
     base, libro_servido, monkeypatch
 ):
