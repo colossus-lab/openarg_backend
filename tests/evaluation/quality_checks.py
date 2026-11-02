@@ -382,6 +382,11 @@ _IDENTIFIER_RE = re.compile(
     r"\b(?:raw|mart|staging)\.[a-z_][a-z0-9_]{3,}|\bcache_[a-z0-9_]{4,}|__v\d+\b",
     re.IGNORECASE,
 )
+# Lo que queda si la limpieza borra el nombre y no el esquema. "los datos raw."
+# es prosa, por eso sólo `raw.` entre comillas invertidas o seguido de otro punto.
+_LEFTOVER_SCHEMA_RE = re.compile(
+    r"`(?:raw|mart|staging|public)\.`|\b(?:raw|mart|staging|public)\.\."
+)
 
 
 def leaked_errors(text: str) -> list[str]:
@@ -389,7 +394,8 @@ def leaked_errors(text: str) -> list[str]:
 
 
 def leaked_identifiers(text: str) -> list[str]:
-    return sorted({m.group(0) for m in _IDENTIFIER_RE.finditer(text or "")})
+    patterns = (_IDENTIFIER_RE, _LEFTOVER_SCHEMA_RE)
+    return sorted({m.group(0) for p in patterns for m in p.finditer(text or "")})
 
 
 # ── fuentes por tipo ───────────────────────────────────────

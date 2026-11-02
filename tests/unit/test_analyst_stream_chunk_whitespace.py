@@ -50,6 +50,11 @@ class TestStreamingPreservesWordBoundaries:
         assert "661 leyes" in out
         assert " del período" in out, "the following chunk keeps its separator"
 
+    def test_a_schema_qualified_leak_leaves_nothing_mid_stream(self) -> None:
+        out = _stream(["Hay", " 42", " en", " `raw.cache_ddjj_oa`", " del", " período"])
+        # Cada fragmento conserva sus bordes: quedan dos espacios, no un resto.
+        assert out.split() == "Hay 42 en del período".split()
+
     def test_a_chunk_that_is_entirely_a_leak_does_not_glue_its_neighbours(self) -> None:
         out = _stream(["total", " cache_presupuesto_2025", " correcto"])
         assert "cache_presupuesto_2025" not in out

@@ -136,8 +136,14 @@ _INTERNAL_NAMES = (
     "sesion_chunks",
 )
 _INTERNAL_NAMES_GROUP = "|".join(_INTERNAL_NAMES)
+# Se lleva también lo que envuelve al nombre. Borrar sólo el nombre dejaba
+# "Fuente: `raw.`." con `raw.cache_ddjj_oa`: las tablas de DDJJ viven en `raw` y
+# `query_analytics` se escribe `public.query_analytics`. Las comillas se sacan
+# sólo de a pares: una que abre una frase no es del nombre.
 _RE_INTERNAL_IDENTIFIER = re.compile(
-    r"\b(?:" + _INTERNAL_NAMES_GROUP + r")\b",
+    r'(`|\*{1,2})?(?:"?\b(?:raw|mart|staging|public)"?\.)?'
+    r'(?:"(?:' + _INTERNAL_NAMES_GROUP + r')"|\b(?:' + _INTERNAL_NAMES_GROUP + r")\b)"
+    r"(?(1)\1)",
     re.IGNORECASE,
 )
 # Matches a parenthetical or punctuation-wrapped citation like
