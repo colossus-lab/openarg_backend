@@ -2430,9 +2430,10 @@ async def test_opcion_b_una_cita_textual_sin_cifra_propia_sale_de_las_fuentes(
     fuentes sale de la selección, y la selección sólo suma algo sin cifras si
     su título aparece en el texto: el título de las sesiones
     ('Transcripciones parlamentarias: "retenciones exportaciones"') el
-    modelo no lo escribe. La cita queda sin su fuente, aunque el gráfico de
-    las sesiones sigue. Es la clase «usada sin cifra propia» del costo
-    aceptado (H100), y en correct pasa lo mismo.
+    modelo no lo escribe. La cita queda sin su fuente. Es la clase «usada sin
+    cifra propia» del costo aceptado (H100), y en correct pasa lo mismo. Las
+    sesiones no tienen gráfico: varios fragmentos con la misma fecha no son una
+    serie, y lo que se unía eran números de reunión y de páginas.
 
     Off lista las dos, y el chequeo `fuente_sin_cifra` de la batería marca
     las sesiones: su evidencia tiene números (período, reunión, páginas) y
@@ -2474,10 +2475,7 @@ async def test_opcion_b_una_cita_textual_sin_cifra_propia_sale_de_las_fuentes(
     assert result.verification["sin_respaldo"] == [] and result.verification["contexto"] == 0
     assert fuentes == [EXPORTACIONES_ICA.dataset_title]
     assert _fuentes_sin_cifra(answer, result) == ([], [])
-    if mode == "correct":
-        assert sesiones not in graficos
-    else:
-        assert sesiones in graficos
+    assert sesiones not in graficos
 
 
 # ── cifras sin haber leído nada (02-nov) ───────────────────

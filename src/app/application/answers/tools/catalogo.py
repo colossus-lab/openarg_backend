@@ -184,7 +184,7 @@ async def resolve(sandbox: Any, requested: str) -> ResolvedTable:
             name=mart.table_name,
             title=_mart_title(mart),
             portal=_MART_PORTAL,
-            url="",
+            url=mart.source_url,
             row_count=mart.row_count,
             mart=mart,
         )
@@ -203,7 +203,8 @@ async def resolve(sandbox: Any, requested: str) -> ResolvedTable:
 
 def _mart_title(mart: MartInfo) -> str:
     first = next((line.strip() for line in mart.description.splitlines() if line.strip()), "")
-    return first[:160] or mart.mart_id
+    # El primer renglón puede cortar la oración: "... en hogares y personas,".
+    return first[:160].rstrip(" ,;:") or mart.mart_id
 
 
 def _sandbox_error(result: Any) -> str:

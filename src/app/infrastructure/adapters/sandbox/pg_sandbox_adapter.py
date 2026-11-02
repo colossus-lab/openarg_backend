@@ -1115,9 +1115,53 @@ class PgSandboxAdapter(ISQLSandbox):
                 ),
                 {"views": views},
             ).fetchall()
+            source_urls = self._mart_source_urls(conn, views)
             conn.rollback()
         infos = [self._mart_info(r) for r in rows]
+        for info in infos:
+            info.source_url = source_urls.get(bare_name(info.table_name).lower(), "")
         return {i.table_name: i for i in infos}
+
+    # Every relation a mart's view reads, with the file behind it when there is
+    # one. `download_url`, not `url`: `url` holds a contact list in CABA and a
+    # portal's home page elsewhere.
+    _MART_SOURCES_SQL = text(
+        """
+        SELECT DISTINCT lower(mv.relname) AS vista, src.relname AS tabla,
+               CASE WHEN d.download_url ~* '^https?://' THEN d.download_url END AS url
+        FROM pg_class mv
+        JOIN pg_namespace mn ON mn.oid = mv.relnamespace AND mn.nspname = 'mart'
+        JOIN pg_rewrite w ON w.ev_class = mv.oid
+        JOIN pg_depend dep ON dep.objid = w.oid
+             AND dep.classid = 'pg_rewrite'::regclass
+             AND dep.refclassid = 'pg_class'::regclass
+        JOIN pg_class src ON src.oid = dep.refobjid AND src.oid <> mv.oid
+        LEFT JOIN raw.cached_datasets cd ON cd.table_name = src.relname
+        LEFT JOIN public.datasets d ON d.id = cd.dataset_id
+        WHERE lower(mv.relname) = ANY(:views)
+        """
+    )
+
+    def _mart_source_urls(self, conn: Any, views: list[str]) -> dict[str, str]:
+        """The source file of each mart that comes from exactly one.
+
+        A mart that combines several files, or reads a table with no known file,
+        has no single link that would let someone check its figures. Best effort:
+        without it the mart is still served, just with no link.
+        """
+        try:
+            rows = conn.execute(self._MART_SOURCES_SQL, {"views": views}).fetchall()
+        except Exception:
+            logger.warning("Could not read the source files of %s", views, exc_info=True)
+            return {}
+        urls: dict[str, set[str | None]] = {}
+        for row in rows:
+            urls.setdefault(row.vista, set()).add(row.url)
+        return {
+            vista: found
+            for vista, archivos in urls.items()
+            if len(archivos) == 1 and (found := next(iter(archivos))) is not None
+        }
 
     async def describe_marts(self, table_names: list[str]) -> dict[str, MartInfo]:
         loop = asyncio.get_running_loop()
@@ -1134,7 +1178,10 @@ class PgSandboxAdapter(ISQLSandbox):
             rows = conn.execute(
                 text(
                     "SELECT cd.table_name, d.title, d.portal, "
-                    "       COALESCE(NULLIF(d.url, ''), d.download_url, '') AS url "
+                    # `url` is not always a link: a contact list in CABA, an
+                    # organization's name in Córdoba and Misiones.
+                    "       CASE WHEN d.url ~* '^https?://' THEN d.url "
+                    "            ELSE COALESCE(d.download_url, '') END AS url "
                     "FROM raw.cached_datasets cd "
                     "JOIN public.datasets d ON d.id = cd.dataset_id "
                     "WHERE cd.table_name = ANY(:names)"
