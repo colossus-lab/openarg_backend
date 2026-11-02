@@ -325,7 +325,11 @@ def corrida(fuentes: TresFuentes, monkeypatch: pytest.MonkeyPatch) -> dict[str, 
     monkeypatch.setattr(indec, "get_sync_engine", lambda: fuentes.engine)
     monkeypatch.setattr(indec, "_ingest_sheet", por_hoja)
     monkeypatch.setattr(indec, "_refresh_indec_marts", refrescar)
-    monkeypatch.setattr(indec, "_register_dataset", lambda *a, **k: None)
+    monkeypatch.setattr(indec, "_register_dataset", lambda *a, **k: "dataset-de-prueba")
+    monkeypatch.setattr(
+        "app.infrastructure.celery.tasks.scraper_tasks.index_dataset_embedding.delay",
+        lambda *a, **k: None,
+    )
     monkeypatch.setattr(indec, "register_via_b_table", lambda *a, **k: True)
     monkeypatch.setattr(fuentes.engine, "dispose", lambda: None)
     monkeypatch.setattr(

@@ -316,7 +316,11 @@ def tarea(escena: Escena, monkeypatch: pytest.MonkeyPatch) -> Iterator[dict[str,
         "_download_and_parse",
         lambda url: {("main" if k == "" else k): v for k, v in estado["hojas"].items()},
     )
-    monkeypatch.setattr(indec, "_register_dataset", lambda *a, **k: None)
+    monkeypatch.setattr(indec, "_register_dataset", lambda *a, **k: "dataset-de-prueba")
+    monkeypatch.setattr(
+        "app.infrastructure.celery.tasks.scraper_tasks.index_dataset_embedding.delay",
+        lambda *a, **k: None,
+    )
     monkeypatch.setattr(indec, "_refresh_indec_marts", lambda: estado["refrescos"].append(1))
     monkeypatch.setattr(_db, "_trigger_marts_for_portal", lambda *a, **k: None)
     monkeypatch.setattr(
