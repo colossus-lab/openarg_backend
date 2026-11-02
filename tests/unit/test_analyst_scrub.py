@@ -87,6 +87,59 @@ def test_scrub_handles_empty_string() -> None:
     assert _scrub_internal_identifiers("") == ""
 
 
+@pytest.mark.parametrize(
+    "citado",
+    [
+        "raw.cache_ddjj_oa",
+        "`raw.cache_ddjj_oa`",
+        'raw."cache_ddjj_oa"',
+        '"raw"."cache_ddjj_oa"',
+        '`"raw"."cache_ddjj_oa"`',
+        "**raw.cache_ddjj_oa**",
+        "*cache_ddjj_oa*",
+        "RAW.CACHE_DDJJ_OA",
+        "raw.cached_datasets",
+        "`cache_leyes_sancionadas`",
+        '"cache_leyes_sancionadas"',
+        "public.query_analytics",
+        "`public.query_analytics`",
+        "mart.mart_definitions",
+        "staging.cache_x",
+        "raw.cache_x__dbcccf6f__v1",
+    ],
+)
+def test_scrub_no_deja_restos_de_lo_que_envuelve_al_nombre(citado: str) -> None:
+    scrubbed = _scrub_internal_identifiers(f"Hay 42 registros en {citado} y otros 7.")
+    assert scrubbed == "Hay 42 registros en y otros 7."
+
+
+@pytest.mark.parametrize(
+    "texto",
+    [
+        # La comilla o el asterisco que no cierra el nombre no es parte de él.
+        '"cache_x es una tabla", dijo',
+        "`cache_x y más cosas`",
+        "**cache_x y más cosas**",
+    ],
+)
+def test_scrub_deja_el_envoltorio_que_no_es_del_nombre(texto: str) -> None:
+    scrubbed = _scrub_internal_identifiers(texto)
+    assert "cache_x" not in scrubbed
+    assert scrubbed[0] == texto[0] and scrubbed[-1] == texto[-1]
+
+
+@pytest.mark.parametrize(
+    "texto",
+    [
+        "Trabajamos con los datos raw. Después se limpian.",
+        "El mart. y el public. no son nombres de tabla.",
+        "Las cuentas públicas de la provincia, en `tasa_call`.",
+    ],
+)
+def test_scrub_no_toca_el_nombre_de_un_esquema_en_la_prosa(texto: str) -> None:
+    assert _scrub_internal_identifiers(texto) == texto
+
+
 # ── M7 (round v46): expanded internal-name coverage ──────────────
 
 

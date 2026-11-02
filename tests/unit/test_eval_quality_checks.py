@@ -99,6 +99,12 @@ def test_detecta_un_error_interno_que_llego_al_usuario() -> None:
     assert leaked_errors('psycopg.errors: relation "x" does not exist')
 
 
+def test_un_esquema_suelto_es_aviso_pero_la_prosa_no() -> None:
+    assert leaked_identifiers("Fuente: `raw.`.") == ["`raw.`"]
+    assert leaked_identifiers("Fuente: raw..") == ["raw.."]
+    assert not leaked_identifiers("Trabajamos con los datos raw. Después se limpian.")
+
+
 def test_un_nombre_de_tabla_interno_es_aviso() -> None:
     texto = "según raw.datos_gob_ar__estudio_nacional_sobre_el_perfil_de__08ca74a9__v1"
     assert leaked_identifiers(texto)
