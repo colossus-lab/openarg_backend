@@ -191,6 +191,16 @@ class TestFechasNoIso:
         charts = _build_deterministic_charts([_make_result(records, format="json")])
         assert [r["valor"] for r in charts[0]["data"]] == [3, 6, 13]
 
+    def test_los_semestres_van_en_orden_y_no_por_texto(self):
+        records = [
+            {"periodo": "1er. semestre 2017", "valor": 2},
+            {"periodo": "1er. semestre 2026", "valor": 4},
+            {"periodo": "2do. semestre 2016", "valor": 1},
+            {"periodo": "2do. semestre 2025", "valor": 3},
+        ]
+        charts = _build_deterministic_charts([_make_result(records, format="json")])
+        assert [r["valor"] for r in charts[0]["data"]] == [1, 2, 3, 4]
+
     def test_updated_at_no_es_el_eje_temporal(self):
         records = [
             {"updated_at": "2026-05-06", "nombre": "B", "valor": 2},
