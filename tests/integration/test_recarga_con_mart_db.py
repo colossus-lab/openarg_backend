@@ -207,11 +207,11 @@ def test_rechaza_un_cambio_de_columnas(escena: Escena) -> None:
 
 
 def test_rechaza_un_archivo_recortado(escena: Escena) -> None:
-    replace_table_keeping_dependents(
-        escena.engine,
-        pd.DataFrame({"periodo": ["2026-01-01"] * 10, "valor": ["1"] * 10}),
-        escena.tabla,
-    )
+    with escena.engine.begin() as conn:
+        pd.DataFrame({"periodo": ["2026-01-01"] * 8, "valor": ["1"] * 8}).to_sql(
+            escena.tabla, conn, schema="raw", if_exists="append", index=False
+        )
+        conn.execute(text(f'REFRESH MATERIALIZED VIEW mart."{escena.mart}"'))
     antes = (escena.filas(), escena.mart_filas())
 
     with pytest.raises(TableReplaceRefused, match="rows would replace"):

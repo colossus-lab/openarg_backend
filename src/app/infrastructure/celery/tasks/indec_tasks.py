@@ -7,6 +7,8 @@ INDEC no tiene CKAN. Se predefinen URLs directas a CSV/XLS de alto valor
 
 from __future__ import annotations
 
+import hashlib
+import html
 import io
 import json
 import logging
@@ -743,27 +745,63 @@ def _refresh_indec_marts() -> None:
         refresh_mart.apply_async(args=[mart_id])
 
 
+def _utc_now() -> datetime:
+    return datetime.now(UTC)
+
+
 def _report_failures(engine, failures: list[tuple[str, str]]) -> None:
     """Tell a person. Never raises.
 
     A logged warning is how the IPC went months without loading while the task
     reported success.
+
+    The key carries the month and the reason because `alerting` reports a key
+    once, then only on its 3rd, 10th and 30th sighting. Keyed by sheet alone, a
+    monthly task stuck on the same failure would speak in months 1, 3 and 10,
+    and a new reason on that sheet would not speak at all. It also bounds what a
+    failed send costs: `alerting` records a key before sending it, so the same
+    key stays quiet for the rest of that month, but not the next one.
+
+    Escaped here because `alerting` sends HTML as is, and Telegram refuses a
+    whole message over one stray `<` in an error text.
     """
     if not failures:
         return
     try:
         from app.application.quality.alerting import Alert, notify
 
+        month = f"{_utc_now():%Y-%m}"
         notify(
             engine,
             [
-                Alert(kind="indec_load_failed", key=what, title=what[:80], detail=why[:300])
+                Alert(
+                    kind="indec_load_failed",
+                    key=f"{what} {month} {hashlib.sha256(why.encode()).hexdigest()[:12]}",
+                    title=html.escape(what[:80]),
+                    detail=html.escape(why[:300]),
+                )
                 for what, why in failures
             ],
             heading="OpenArg · INDEC no se pudo recargar",
         )
     except Exception:
         logger.warning("could not report INDEC failures", exc_info=True)
+
+
+def _finish_run(engine, results: dict[str, int], failures: list[tuple[str, str]]) -> None:
+    """What every run owes, however it ended. Never raises.
+
+    Runs on the way out of a time limit too, when there are usually failures to
+    report and sheets already loaded. Those sheets' matviews hold the new rows,
+    but `mart_definitions` would keep the old coverage for another month.
+    """
+    _report_failures(engine, failures)
+    if not results["ingested"]:
+        return
+    try:
+        _refresh_indec_marts()
+    except Exception:
+        logger.warning("could not dispatch the INDEC mart refresh", exc_info=True)
 
 
 @celery_app.task(
@@ -819,17 +857,15 @@ def ingest_indec(self):
                     failures.append((f"{ds_info['id']} [{sheet_name}]", str(exc)))
                     logger.exception("Failed to load INDEC %s [%s]", ds_info["id"], sheet_name)
 
-        _report_failures(engine, failures)
-        if results["ingested"]:
-            _refresh_indec_marts()
-
         return results
 
     except SoftTimeLimitExceeded:
         logger.error("INDEC ingestion timed out")
+        failures.append(("límite de tiempo", f"se cortó con {results['ingested']} hojas cargadas"))
         raise
     except Exception as exc:
         logger.exception("INDEC ingestion failed")
         raise self.retry(exc=exc, countdown=120)
     finally:
+        _finish_run(engine, results, failures)
         engine.dispose()
