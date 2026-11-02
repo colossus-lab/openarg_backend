@@ -5,6 +5,7 @@ import json
 import logging
 import math
 import os
+import re
 import unicodedata
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -72,6 +73,44 @@ def ttl_for_intent(intent: str) -> int:
     return TTL_DAILY
 
 
+# How many nearest questions to look at: the closest one can ask for another
+# figure while the next one asks for the same.
+_SEMANTIC_CANDIDATES = 5
+
+# Words that do not change which figure a question asks for. Keep this list
+# short: a word missing here costs one model call, a word wrongly here serves
+# someone another question's figure. Left out on purpose: "a" (exports to Brazil
+# vs of Brazil), "cuántos" and "cuáles" (a count vs a list), "qué", "quién" and
+# "cómo" (what it is vs how much it is).
+_FILLER_TERMS = frozenset(
+    "el la los las lo un una unos unas de del en "
+    "cual cuanto cuanta "
+    "es son fue fueron era da dan dio dieron vale valen cuesta cuestan esta estan hay "
+    "hoy".split()
+)
+
+
+def question_terms(question: str) -> tuple[str, ...]:
+    """Terms that say what a question asks for, in order and without accents."""
+    decomposed = unicodedata.normalize("NFKD", question.lower())
+    plain = "".join(c for c in decomposed if not unicodedata.combining(c))
+    return tuple(t for t in re.findall(r"\w+", plain) if t not in _FILLER_TERMS)
+
+
+def asks_the_same(question: str, cached_question: str) -> bool:
+    """Whether the answer cached for one question also answers the other.
+
+    The embedding cannot tell: it measures the topic, and two questions about
+    the same series share it whatever figure they ask for. Measured with the
+    embedding this cache uses (staging, 2026-11-02): the index, monthly,
+    year-on-year and cumulative variations of one series score 0.91-0.989,
+    while paraphrases of one question score 0.81-0.99. No threshold separates
+    them, so a near question only counts if it asks with the same terms.
+    """
+    terms = question_terms(question)
+    return bool(terms) and terms == question_terms(cached_question)
+
+
 class SemanticCache:
     """Cache that supports exact hash match and vector similarity lookup."""
 
@@ -120,20 +159,36 @@ class SemanticCache:
                     max_distance = 1 - self._similarity_threshold
                     result = await session.execute(
                         text("""
-                            SELECT response, 1 - (embedding <=> CAST(:emb AS vector)) AS similarity
+                            SELECT response, question,
+                                   1 - (embedding <=> CAST(:emb AS vector)) AS similarity
                             FROM query_cache
                             WHERE expires_at > :now
                               AND embedding IS NOT NULL
                               AND embedding <=> CAST(:emb AS vector) < :max_dist
                             ORDER BY embedding <=> CAST(:emb AS vector)
-                            LIMIT 1
+                            LIMIT :candidates
                         """),
-                        {"emb": emb_str, "now": now, "max_dist": max_distance},
+                        {
+                            "emb": emb_str,
+                            "now": now,
+                            "max_dist": max_distance,
+                            "candidates": _SEMANTIC_CANDIDATES,
+                        },
                     )
-                    row = result.fetchone()
-                    if row and row[1] >= self._similarity_threshold:
-                        logger.debug("Semantic cache hit (similarity=%.3f)", row[1])
-                        return row[0] if isinstance(row[0], dict) else json.loads(row[0])
+                    near = [
+                        row for row in result.fetchall() if row[2] >= self._similarity_threshold
+                    ]
+                    for response, cached_question, similarity in near:
+                        if asks_the_same(question, cached_question):
+                            logger.info("Semantic cache hit (similarity=%.3f)", similarity)
+                            return response if isinstance(response, dict) else json.loads(response)
+                    if near:
+                        logger.info(
+                            "Semantic cache: %d near questions ask for something else "
+                            "(best similarity=%.3f)",
+                            len(near),
+                            near[0][2],
+                        )
 
         except Exception:
             logger.debug("Semantic cache lookup failed", exc_info=True)
