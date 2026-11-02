@@ -203,8 +203,7 @@ async def resolve(sandbox: Any, requested: str) -> ResolvedTable:
 
 def _mart_title(mart: MartInfo) -> str:
     first = next((line.strip() for line in mart.description.splitlines() if line.strip()), "")
-    # El primer renglón puede cortar la oración: "... en hogares y personas,".
-    return first[:160].rstrip(" ,;:") or mart.mart_id
+    return first[:160] or mart.mart_id
 
 
 def _sandbox_error(result: Any) -> str:
