@@ -374,3 +374,163 @@ def test_a_failed_repair_still_records_its_error_not_its_reason() -> None:
 
     params = conn.execute.call_args[0][1]
     assert params["err"] == "deadlock detected"
+
+
+# ---------- periodos inventados por el LLM (cuadro 1.6 de la EPH, 30-oct-2026) ----------
+#
+# Las columnas con las que el 1.6 llegó a prod: el título del cuadro, 34
+# trimestres sin año (1T-2017 a 2T-2025, con las notas y los "º" que NFKC volvió
+# "o") y la columna separadora que sobrevivió como `col_25`. Los nombres que
+# están en el informe del incidente van tal cual; los sufijos de los demás se
+# reconstruyeron con la misma regla de dedupe.
+_CUADRO_1_6_OLD = [
+    "Cuadro 1.6 Composición de la tasa de desocupación. Total 31 a",
+    # 2017
+    "1° trimestre",
+    "2° trimestre",
+    "3° trimestre",
+    "4° trimestre",
+    # 2018
+    "1° trimestre_2",
+    "2° trimestre_2",
+    "3° trimestre_2",
+    "4° trimestre_2",
+    # 2019
+    "1° trimestre_3",
+    "2° trimestre_3",
+    "3° trimestre (1)",
+    "4° trimestre_3",
+    # 2020
+    "1° trimestre_4",
+    "2o trimestre",
+    "3o trimestre (2)",
+    "4o trimestre",
+    # 2021
+    "1o trimestre",
+    "2o trimestre_2",
+    "3o trimestre",
+    "4o trimestre_2",
+    "col_25",
+    # 2022
+    "1° trimestre_5",
+    "2° trimestre_3",
+    "3° trimestre_3",
+    "4° trimestre_4",
+    # 2023
+    "1° trimestre_6",
+    "2o trimestre_3",
+    "3° trimestre_4",
+    "4° trimestre_5",
+    # 2024
+    "1° trimestre_7",
+    "2o trimestre_4",
+    "3° trimestre_5",
+    "4° trimestre_6",
+    # 2025
+    "1° trimestre_8",
+    "2° trimestre_4",
+]
+
+# Lo que propuso el modelo: los mismos 36 casilleros, fechados 2003-2011.
+_CUADRO_1_6_PROPUESTA = (
+    ["categoria_desocupacion"]
+    + [f"q{q}_{y}" for y in range(2003, 2008) for q in range(1, 5)]
+    + ["metadata_21"]
+    + [f"q{q}_{y}" for y in range(2008, 2012) for q in range(1, 5)][:14]
+)
+
+# Filas de muestra reales del 1.6 (las dos primeras con datos).
+_CUADRO_1_6_FILAS = [
+    ["Tasa de desocupación"]
+    + [9.2, 8.7, 8.3, 7.2, 9.1, 9.6, 9.0, 9.1, 10.1, 10.6, 9.0, 8.9]
+    + [10.4, 13.1, 11.7, 11.0, 10.2, 9.6, 8.2, 7.0, None]
+    + [7.0, 6.9, 7.1, 6.3, 6.9, 6.2, 5.7, 5.7, 7.7, 7.6, 6.9, 6.4, 7.9, 7.6],
+    ["Mujeres hasta 29 años"]
+    + [2.2, 2.2, 2.1, 2.0, 2.4, 2.4, 2.3, 2.4, 2.5, 2.5, 2.3, 2.0]
+    + [2.6, 2.8, 2.4, 2.8, 2.5, 2.3, 1.9, 1.7, None]
+    + [1.8, 1.5, 1.8, 1.4, 1.9, 1.4, 1.4, 1.4, 1.8, 1.7, 1.7, 1.5, 2.0, 1.8],
+]
+
+
+def test_las_fixtures_del_1_6_tienen_el_largo_real() -> None:
+    assert len(_CUADRO_1_6_OLD) == 36
+    assert len(_CUADRO_1_6_PROPUESTA) == 36
+    assert all(len(f) == 36 for f in _CUADRO_1_6_FILAS)
+
+
+@pytest.mark.asyncio
+async def test_rechaza_los_anios_que_el_llm_le_invento_al_1_6() -> None:
+    """El caso del hackatón: ni los nombres ni las filas dicen 2003."""
+    llm = AsyncMock()
+    llm.chat_json.return_value.content = json.dumps({"proposed_columns": _CUADRO_1_6_PROPUESTA})
+
+    new_cols, rows, reason = await propose_llm_assisted_rename(
+        _CUADRO_1_6_OLD, _CUADRO_1_6_FILAS, llm=llm
+    )
+
+    assert reason.startswith("invented_periods:")
+    assert "2003" in reason
+    assert new_cols == _CUADRO_1_6_OLD
+    assert rows == 0
+
+
+def test_un_anio_que_esta_en_las_filas_no_es_inventado() -> None:
+    from app.application.repair.parse_repair import invented_periods
+
+    old = ["col_0", "col_1"]
+    filas = [["Año 2017", 9.2], ["Año 2018", 9.1]]
+
+    assert invented_periods(old, filas, ["periodo", "tasa"]) == []
+    assert invented_periods(old, filas, ["periodo_2017", "tasa"]) == []
+    assert invented_periods(old, filas, ["periodo_2019", "tasa"]) == ["2019"]
+
+
+def test_un_anio_que_esta_en_el_nombre_viejo_no_es_inventado() -> None:
+    from app.application.repair.parse_repair import invented_periods
+
+    assert invented_periods(["col_2018_0", "col_1"], [], ["anio_2018", "valor"]) == []
+
+
+def test_un_trimestre_sin_evidencia_es_inventado() -> None:
+    """Sin años también: `q1` donde nada habla de trimestres."""
+    from app.application.repair.parse_repair import invented_periods
+
+    assert invented_periods(["col_0", "col_1"], [["BA", 1.5]], ["provincia", "q1"]) == ["q1"]
+    # Con "trimestre" en los nombres viejos, el trimestre no es inventado.
+    assert invented_periods(["col_0", "1° trimestre"], [["BA", 1.5]], ["provincia", "t1"]) == []
+
+
+def test_una_columna_que_no_cambia_no_se_juzga() -> None:
+    from app.application.repair.parse_repair import invented_periods
+
+    assert invented_periods(["q1_2003", "col_1"], [], ["q1_2003", "valor"]) == []
+
+
+@pytest.mark.asyncio
+async def test_las_tablas_del_indec_no_pasan_por_el_llm() -> None:
+    """`cache_indec_*` las reescribe `ingest_indec`: el modelo no las nombra."""
+    from unittest.mock import MagicMock
+
+    from app.application.repair.parse_repair import repair_with_llm_assist
+
+    engine = MagicMock()
+    llm = AsyncMock()
+
+    outcome = await repair_with_llm_assist(
+        engine,
+        llm=llm,
+        table_schema="raw",
+        table_name="cache_indec_eph_tasas_cuadro_1_6",
+        dry_run=False,
+    )
+
+    assert outcome.reason == "excluded_table"
+    assert not outcome.ok
+    llm.chat_json.assert_not_called()
+    engine.connect.assert_not_called()
+
+
+def test_la_consulta_nocturna_excluye_las_tablas_del_indec() -> None:
+    from app.infrastructure.celery.tasks.llm_repair_tasks import _CANDIDATES_SQL
+
+    assert r"NOT LIKE 'cache\_indec\_%'" in str(_CANDIDATES_SQL)

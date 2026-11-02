@@ -11,8 +11,9 @@ import io
 import json
 import logging
 import re
+import time
 import zipfile
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 
 import pandas as pd
 from celery.exceptions import SoftTimeLimitExceeded
@@ -24,6 +25,7 @@ from app.application.pipeline.parsers import (
     promote_buried_headers,
     unpivot_if_time_pivoted,
 )
+from app.application.pipeline.parsers.hierarchical_headers import ParsedHeaders, classify_row
 from app.infrastructure.celery.app import celery_app
 from app.infrastructure.celery.tasks._db import get_sync_engine
 from app.infrastructure.celery.tasks.collector_tasks import (
@@ -38,7 +40,10 @@ logger = logging.getLogger(__name__)
 INDEC_DATASETS = [
     # ── Verificados con HEAD 200 OK — Mar 2026 ──
     # URLs con nombre fijo (se actualizan in-place en el FTP del INDEC).
-    # URLs con fecha en el nombre están marcadas con ⚠ — revisar periódicamente.
+    # URLs con año en el nombre están marcadas con ⚠ — revisar periódicamente.
+    # Las que llevan el período de publicación (`_09_25`, `1_sem_2025`) tienen
+    # `url_pattern`: `resolve_dated_url` busca la edición más reciente y `url`
+    # queda como la última conocida, por si no encuentra ninguna.
     # ── Precios ──
     {
         "id": "ipc",
@@ -111,24 +116,28 @@ INDEC_DATASETS = [
         "id": "pobreza_informe",
         "name": "Informe de Pobreza — 31 aglomerados urbanos",
         "url": "https://www.indec.gob.ar/ftp/cuadros/sociedad/cuadros_informe_pobreza_09_25.xls",
-    },  # ⚠ fecha
+        "url_pattern": "https://www.indec.gob.ar/ftp/cuadros/sociedad/cuadros_informe_pobreza_{mm}_{yy}.xls",
+    },
     # ── Mercado de Trabajo (EPH) ──
     {
         "id": "eph_tasas",
         "name": "EPH — Tasas e indicadores laborales",
         "url": "https://www.indec.gob.ar/ftp/cuadros/sociedad/cuadros_tasas_indicadores_eph_09_25.xls",
-    },  # ⚠ fecha
+        "url_pattern": "https://www.indec.gob.ar/ftp/cuadros/sociedad/cuadros_tasas_indicadores_eph_{mm}_{yy}.xls",
+    },
     {
         "id": "eph_hogares",
         "name": "EPH — Indicadores de hogares",
         "url": "https://www.indec.gob.ar/ftp/cuadros/sociedad/eph_indicadores_hogares_1_sem_2025.xls",
-    },  # ⚠ fecha
+        "url_pattern": "https://www.indec.gob.ar/ftp/cuadros/sociedad/eph_indicadores_hogares_{s}_sem_{yyyy}.xls",
+    },
     # ── Distribución del Ingreso ──
     {
         "id": "distribucion_ingreso",
         "name": "Distribución del Ingreso (EPH)",
         "url": "https://www.indec.gob.ar/ftp/cuadros/sociedad/indicadores_eph_total_urbano_ingresos_3t_2025.xls",
-    },  # ⚠ fecha
+        "url_pattern": "https://www.indec.gob.ar/ftp/cuadros/sociedad/indicadores_eph_total_urbano_ingresos_{q}t_{yyyy}.xls",
+    },
     # ── Turismo Internacional ──
     {
         "id": "turismo_receptivo",
@@ -248,6 +257,57 @@ def _detect_header_row(df_raw: pd.DataFrame) -> int:
 # This module imports them at the top; the inline copies that used to sit
 # here were extracted in 2026-05-08 (specs/021-parser-hardening Phase 1) so
 # the generic collector path can use the same logic.
+def _hierarchical_frame(df_raw: pd.DataFrame, parsed: ParsedHeaders) -> pd.DataFrame:
+    df = df_raw.iloc[parsed.skipped_rows :].reset_index(drop=True).copy()
+    df.columns = parsed.columns
+    # The spacer INDEC leaves after each year's periods. It is not always
+    # empty — Cuadro 1.3 of the EPH fills it with 0.0 — so `dropna` later
+    # would keep it as a `col_N` holding fake zeros.
+    return df.drop(columns=[parsed.columns[j] for j in parsed.separator_columns])
+
+
+def _later_year_blocks(df_raw: pd.DataFrame, parsed: ParsedHeaders) -> list[int]:
+    """Rows below the data where the header starts over with another year.
+
+    A row of years alone is not enough: it has to be followed by the same kind
+    of period row the first header had, so a stray row of year-like figures
+    inside the data does not cut the table in two.
+    """
+    if parsed.year_row_idx is None or parsed.period_kind is None:
+        return []
+    starts: list[int] = []
+    for i in range(parsed.skipped_rows, len(df_raw) - 1):
+        row = classify_row(df_raw.iloc[i].tolist())
+        if row is None or row.kind != "year":
+            continue
+        following = classify_row(df_raw.iloc[i + 1].tolist())
+        if following is not None and following.kind == parsed.period_kind:
+            starts.append(i)
+    return starts
+
+
+def _block_titles(df_raw: pd.DataFrame, header_rows: list[int]) -> list[str]:
+    """The title above each block: the nearest row holding only column 0.
+
+    Searched upward from each block's year row to the end of the previous
+    block's data. Empty string when a block has none.
+    """
+    titles: list[str] = []
+    for k, start in enumerate(header_rows):
+        floor = header_rows[k - 1] if k else -1
+        title = ""
+        for i in range(start - 1, floor, -1):
+            row = df_raw.iloc[i]
+            filled = [j for j, v in enumerate(row.tolist()) if pd.notna(v) and str(v).strip()]
+            if filled == [0]:
+                title = re.sub(r"\s+", " ", str(row.iloc[0])).strip()[:120]
+                break
+            if len(filled) > 1:
+                break  # reached the previous block's data
+        titles.append(title)
+    return titles
+
+
 def _parse_xls_sheet(content: bytes, sheet: str | int) -> pd.DataFrame | None:
     """Parse a single Excel sheet, auto-detecting the header row."""
     try:
@@ -274,10 +334,28 @@ def _parse_xls_sheet(content: bytes, sheet: str | int) -> pd.DataFrame | None:
 
     parsed = parse_hierarchical_headers(df_raw)
     if parsed.year_row_idx is not None or parsed.period_row_idx is not None:
-        df = df_raw.iloc[parsed.skipped_rows :].reset_index(drop=True).copy()
+        starts = _later_year_blocks(df_raw, parsed)
+        if starts:
+            # One table per year stacked down the sheet (the CVS: `Año 2016`
+            # and its months, 31 days, then `Año 2017` …). Read with the first
+            # header only, every block would be dated 2016.
+            bounds = [0, *starts, len(df_raw)]
+            frames = []
+            for a, b in zip(bounds, bounds[1:]):
+                block = df_raw.iloc[a:b].reset_index(drop=True)
+                frames.append(_hierarchical_frame(block, parse_hierarchical_headers(block)))
+            # Blocks can also be different series that share a layout — the
+            # poverty report stacks CBA, Engel's inverse and CBT, each by region
+            # and month. Their titles are the only thing telling them apart.
+            titles = _block_titles(df_raw, [parsed.year_row_idx, *starts])
+            if all(titles) and len(set(titles)) > 1:
+                frames = [f.assign(serie=t) for f, t in zip(frames, titles)]
+                frames = [f[["serie", *f.columns[:-1]]] for f in frames]
+            df = pd.concat(frames, ignore_index=True, sort=False)
+        else:
+            df = _hierarchical_frame(df_raw, parsed)
         if df.empty:
             return None
-        df.columns = parsed.columns
     else:
         # Use the range detector so 2-row headers (parent merged cells +
         # child sub-headers, common in INDEC `cuadros`) produce composite
@@ -353,6 +431,111 @@ def _parse_xls_sheet(content: bytes, sheet: str | int) -> pd.DataFrame | None:
     df = unpivot_if_time_pivoted(df)
 
     return df
+
+
+# What the INDEC's server sends for a spreadsheet. For a file that does not
+# exist it answers **200 with text/html** — its own "not found" page — so a
+# status check alone would take any guessed name as published.
+_EXCEL_CONTENT_TYPES = frozenset(
+    {
+        "application/vnd.ms-excel",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "application/x-msexcel",
+        "application/excel",
+    }
+)
+# How far back to look, in months. Two years covers a release the INDEC skipped
+# and still stops well short of hammering the server for a renamed series.
+_RESOLVE_MONTHS_BACK = 24
+_RESOLVE_TTL_SECONDS = 6 * 3600
+_resolved_cache: dict[str, tuple[str, float]] = {}
+
+
+def _dated_url_candidates(pattern: str, *, today: date, months_back: int) -> list[str]:
+    """Every name `pattern` produces from this month back, newest first.
+
+    Placeholders: `{yyyy}`, `{yy}`, `{mm}`, `{q}` (quarter 1-4) and `{s}`
+    (semester 1-2). Walking month by month and dropping repeats gives each
+    granularity for free: a quarterly pattern yields one name per quarter.
+    """
+    seen: list[str] = []
+    year, month = today.year, today.month
+    for _ in range(months_back + 1):
+        url = pattern.format(
+            yyyy=f"{year:04d}",
+            yy=f"{year % 100:02d}",
+            mm=f"{month:02d}",
+            q=(month - 1) // 3 + 1,
+            s=1 if month <= 6 else 2,
+        )
+        if url not in seen:
+            seen.append(url)
+        year, month = (year, month - 1) if month > 1 else (year - 1, 12)
+    return seen
+
+
+def _is_excel(response) -> bool:
+    content_type = response.headers.get("content-type", "").split(";")[0].strip().lower()
+    return response.status_code == 200 and content_type in _EXCEL_CONTENT_TYPES
+
+
+def resolve_dated_url(ds_info: dict, *, client=None, today: date | None = None) -> str:
+    """The newest published edition of a file whose name carries its period.
+
+    `cuadros_tasas_indicadores_eph_09_25.xls` was hard-coded in March 2026; by
+    October the INDEC had published `_12_25`, `_03_26`, `_06_26` and `_09_26`,
+    and OpenArg was still serving the September 2025 one. Each candidate is
+    asked for with a HEAD, newest first, and only a spreadsheet counts.
+
+    Falls back to `ds_info["url"]` — the last edition known to exist — when
+    nothing newer answers, when the network fails, or when the entry has no
+    `url_pattern`.
+    """
+    pattern = ds_info.get("url_pattern")
+    fallback = ds_info["url"]
+    if not pattern:
+        return fallback
+
+    import httpx
+
+    candidates = _dated_url_candidates(
+        pattern, today=today or datetime.now(UTC).date(), months_back=_RESOLVE_MONTHS_BACK
+    )
+    own_client = client is None
+    client = client or httpx.Client(timeout=15.0)
+    try:
+        for url in candidates:
+            if url == fallback:
+                # Reached the edition we already knew about: nothing newer.
+                break
+            try:
+                response = client.head(url, follow_redirects=True)
+            except httpx.HTTPError:
+                logger.warning("INDEC %s: no se pudo consultar %s", ds_info["id"], url)
+                return fallback
+            if _is_excel(response):
+                logger.info("INDEC %s: edición más reciente %s", ds_info["id"], url)
+                return url
+    finally:
+        if own_client:
+            client.close()
+    return fallback
+
+
+def current_url(ds_info: dict) -> str:
+    """`resolve_dated_url`, remembered for a few hours per process.
+
+    The live fallback answers questions with these files; a dozen HEADs per
+    question would be latency nobody asked for.
+    """
+    if not ds_info.get("url_pattern"):
+        return ds_info["url"]
+    cached = _resolved_cache.get(ds_info["id"])
+    if cached and cached[1] > time.monotonic():
+        return cached[0]
+    url = resolve_dated_url(ds_info)
+    _resolved_cache[ds_info["id"]] = (url, time.monotonic() + _RESOLVE_TTL_SECONDS)
+    return url
 
 
 def _download_and_parse(url: str) -> dict[str, pd.DataFrame]:
@@ -448,6 +631,9 @@ def ingest_indec(self):
     try:
         for ds_info in INDEC_DATASETS:
             try:
+                # The resolved edition becomes the dataset's URL, so the
+                # catalogue and the download link name the file actually read.
+                ds_info = {**ds_info, "url": resolve_dated_url(ds_info)}
                 sheets = _download_and_parse(ds_info["url"])
                 if not sheets:
                     results["skipped"] += 1

@@ -979,6 +979,58 @@ _LLM_REPAIR_PROMPT_SYSTEM = (
 )
 
 
+# A period is the one thing a name must never supply on its own.
+#
+# The EPH's cuadro 1.6 arrived with its columns read as `1° trimestre`,
+# `2° trimestre`, ... — the quarter survived, the year row did not. Asked to
+# name them, the model counted backwards from nothing and answered
+# `q1_2003 … q2_2011`. The values were 1T-2017 to 2T-2025; the agent told a
+# hackathon on 2026-10-30 that the series "only reaches 2T-2011". Every name was
+# well-formed, distinct and plausible, so nothing downstream could object.
+#
+# A year or quarter in a proposed name has to come from somewhere the model was
+# shown: the old names or the sample rows. If it is in neither, it was invented.
+_YEAR_TOKEN_RE = re.compile(r"(?<!\d)(?:19|20)\d{2}(?!\d)")
+_QUARTER_IN_NAME_RE = re.compile(r"(?:^|_)(?:[qt][1-4]|[1-4][qt]|trim\w*)(?:_|$)")
+_QUARTER_IN_SOURCE_RE = re.compile(
+    r"trim|(?<![a-z0-9])[qt][1-4](?!\d)|(?<!\d)[1-4]\s*(?:°|º|o|er|do|ro|to)?\s*t(?![a-z])",
+    re.IGNORECASE,
+)
+
+
+# Tables the model never renames. `cache_indec_*` is rewritten from the INDEC's
+# own files by `ingest_indec`, whose header parser owns the names; a rename here
+# would last until the next ingest and teach nothing.
+LLM_EXCLUDED_PREFIXES: tuple[str, ...] = ("cache_indec_",)
+
+
+def invented_periods(
+    old_cols: list[str],
+    sample_rows_data: list[list[Any]],
+    proposed: list[str],
+) -> list[str]:
+    """Years and quarters a proposal names that its evidence never mentioned.
+
+    Empty means the proposal only uses periods it was shown. The whole proposal
+    is refused otherwise: a model that made up one year was guessing at the
+    layout, and the columns it did not date are no more trustworthy for it.
+    """
+    evidence = " ".join(
+        [*map(str, old_cols), *(str(v) for row in sample_rows_data for v in row if v is not None)]
+    )
+    seen_years = set(_YEAR_TOKEN_RE.findall(evidence))
+    quarters_seen = bool(_QUARTER_IN_SOURCE_RE.search(evidence))
+
+    invented: list[str] = []
+    for old, new in zip(old_cols, proposed, strict=True):
+        if old == new:
+            continue
+        invented.extend(y for y in _YEAR_TOKEN_RE.findall(new) if y not in seen_years)
+        if not quarters_seen and _QUARTER_IN_NAME_RE.search(new):
+            invented.append(new)
+    return sorted(set(invented))
+
+
 async def propose_llm_assisted_rename(
     old_cols: list[str],
     sample_rows_data: list[list[Any]],
@@ -1088,6 +1140,11 @@ async def propose_llm_assisted_rename(
     proposed_final = [
         old if old in protected else new for old, new in zip(old_cols, proposed_final, strict=True)
     ]
+
+    invented = invented_periods(old_cols, sample_rows_data, proposed_final)
+    if invented:
+        logger.warning("llm-assisted repair: refused, invented periods %s", invented[:10])
+        return old_cols, 0, f"invented_periods:{','.join(invented[:10])}"
     return proposed_final, 0, "applied"
 
 
@@ -1118,6 +1175,13 @@ async def repair_with_llm_assist(
         ok=False,
         dry_run=dry_run,
     )
+
+    if table_name.startswith(LLM_EXCLUDED_PREFIXES):
+        # Every caller, not just the nightly query: the escalation ladder
+        # reaches this function too.
+        outcome.reason = "excluded_table"
+        _audit(engine, run_id=run_id, outcome=outcome, operation="skip", phase="llm_assisted")
+        return outcome
 
     with engine.connect() as conn:
         cols_rows = conn.execute(
