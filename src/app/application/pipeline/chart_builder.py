@@ -60,13 +60,18 @@ def es_eje_temporal(name: str, tabla: str = "") -> bool:
     return is_date_column(name) and not es_fecha_de_atributo(name, tabla)
 
 
+# `1er. semestre 2017`, `2do semestre 2024`, `1° semestre 2026*`.
+_SEMESTRE = re.compile(r"^\s*([12])(?:er|do|°|º)?\.?\s+semestre\s+(?:de\s+)?(\d{4})", re.I)
+
+
 def _sort_chart_rows(rows: list[dict[str, Any]], x_key: str) -> list[dict[str, Any]]:
     """Ordena el eje temporal por la fecha normalizada, no por el texto.
 
     Con ``str()``, "1/10/2017" quedaba antes que "1/9/2017" y "Junio de 2026"
     antes que "Marzo de 2026": el gráfico de línea salía desordenado en las
     respuestas del agente. Lo que no se reconoce como fecha va al final, en
-    su orden de texto.
+    su orden de texto. Los semestres del INDEC tampoco son una fecha para
+    ``fecha_iso``: por texto, todos los "1er." iban antes que los "2do.".
     """
 
     def key(row: dict[str, Any]) -> tuple[int, str]:
@@ -74,6 +79,10 @@ def _sort_chart_rows(rows: list[dict[str, Any]], x_key: str) -> list[dict[str, A
         iso = fecha_iso(value, "inicio")
         if iso is not None:
             return (0, iso)
+        semestre = _SEMESTRE.match(str(value))
+        if semestre is not None:
+            mes = "01" if semestre[1] == "1" else "07"
+            return (0, f"{semestre[2]}-{mes}-01")
         return (1, "" if value is None else str(value))
 
     return sorted(rows, key=key)
