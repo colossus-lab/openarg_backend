@@ -15,7 +15,9 @@ import logging
 import re
 import time
 import zipfile
+from dataclasses import dataclass
 from datetime import UTC, date, datetime
+from typing import Any
 
 import pandas as pd
 from celery.exceptions import SoftTimeLimitExceeded
@@ -39,6 +41,8 @@ from app.infrastructure.celery.tasks.collector_tasks import (
     _detect_data_header_range,
     _detect_data_header_row,
     _finalize_cached_dataset,
+    _record_cache_drop,
+    _resource_identity,
 )
 
 logger = logging.getLogger(__name__)
@@ -869,3 +873,225 @@ def ingest_indec(self):
     finally:
         _finish_run(engine, results, failures)
         engine.dispose()
+
+
+# ── retiro de las copias del colector ────────────────────────────────────────
+
+_PREFIJO_COPIA = "indec__"
+
+
+@dataclass
+class CopiaDelColector:
+    tabla: str
+    filas: int
+    # Sin dataset: una versión vieja que ya no está en el catálogo.
+    dataset_id: str | None = None
+    source_id: str | None = None
+    propia: str | None = None
+    propia_estado: str | None = None
+    propia_error: str | None = None
+    propia_filas: int = 0
+    # Por qué todavía no se puede retirar, o None.
+    espera: str | None = None
+
+
+def copias_del_colector(engine) -> list[CopiaDelColector]:
+    """Las `raw.indec__*` y la `raw.cache_indec_*` de su dataset.
+
+    El nombre de la propia sale del `source_id`: `_register_dataset` lo arma como
+    `indec-<tabla>`.
+    """
+    with engine.connect() as conn:
+        filas = conn.execute(
+            text(
+                """
+                SELECT c.relname AS tabla,
+                       GREATEST(c.reltuples, 0)::bigint AS filas,
+                       CAST(d.id AS text) AS dataset_id,
+                       d.source_id
+                FROM pg_class c
+                JOIN pg_namespace n ON n.oid = c.relnamespace AND n.nspname = 'raw'
+                LEFT JOIN raw.cached_datasets cd ON cd.table_name = c.relname
+                LEFT JOIN datasets d ON d.id = cd.dataset_id AND d.portal = 'indec'
+                WHERE c.relkind = 'r' AND starts_with(c.relname, :prefijo)
+                ORDER BY c.relname
+                """
+            ),
+            {"prefijo": _PREFIJO_COPIA},
+        ).all()
+        copias: list[CopiaDelColector] = []
+        for fila in filas:
+            copia = CopiaDelColector(
+                str(fila.tabla),
+                int(fila.filas),
+                fila.dataset_id,
+                fila.source_id,
+            )
+            copias.append(copia)
+            dependientes = (
+                conn.execute(
+                    text(
+                        """
+                        SELECT DISTINCT v.relname
+                        FROM pg_depend d
+                        JOIN pg_rewrite r ON r.oid = d.objid
+                        JOIN pg_class v ON v.oid = r.ev_class
+                        WHERE d.refobjid = to_regclass(:t) AND v.oid <> d.refobjid
+                        ORDER BY v.relname
+                        """
+                    ),
+                    {"t": f'raw."{copia.tabla}"'},
+                )
+                .scalars()
+                .all()
+            )
+            if dependientes:
+                copia.espera = f"la lee {', '.join(dependientes)}: primero reconstruirlo"
+                continue
+            if copia.source_id is None:
+                continue
+            copia.propia = copia.source_id.removeprefix("indec-")
+            existe = conn.execute(
+                text("SELECT to_regclass(:t) IS NOT NULL"),
+                {"t": f'raw."{copia.propia}"'},
+            ).scalar()
+            if not existe:
+                copia.espera = f"falta raw.{copia.propia}"
+                continue
+            copia.propia_filas = int(
+                conn.execute(text(f'SELECT count(*) FROM raw."{copia.propia}"')).scalar() or 0
+            )
+            if copia.propia_filas == 0:
+                copia.espera = f"raw.{copia.propia} está vacía"
+                continue
+            propia = conn.execute(
+                text(
+                    "SELECT status, error_message FROM raw.cached_datasets "
+                    "WHERE dataset_id = CAST(:d AS uuid) AND table_name = :t"
+                ),
+                {"d": copia.dataset_id, "t": copia.propia},
+            ).first()
+            if propia is None:
+                # Sin su fila, el dataset se quedaría sin nada en el catálogo.
+                copia.espera = f"raw.{copia.propia} sin fila: primero correr ingest_indec"
+                continue
+            copia.propia_estado = str(propia.status)
+            copia.propia_error = propia.error_message
+        conn.rollback()
+    return copias
+
+
+def _retirar_copia(engine, copia: CopiaDelColector) -> None:
+    from app.infrastructure.celery.tasks.catalog_backfill import (
+        _materialization_status,
+        _qualified_materialized_table_name,
+    )
+
+    _record_cache_drop(
+        engine,
+        table_name=f"raw.{copia.tabla}",
+        reason="copia_del_colector_indec",
+        actor="indec_tasks.retirar_copias_indec",
+        extra={"filas": copia.filas, "dataset_id": copia.dataset_id, "propia": copia.propia},
+    )
+    with engine.begin() as conn:
+        # Sin CASCADE: si un mart empezó a depender de la tabla después de la
+        # revisión, falla y se deja, en vez de llevarse el mart.
+        conn.execute(text(f'DROP TABLE raw."{copia.tabla}"'))
+        conn.execute(
+            text(
+                "UPDATE public.raw_table_versions SET superseded_at = now() "
+                "WHERE schema_name = 'raw' AND table_name = :t AND superseded_at IS NULL"
+            ),
+            {"t": copia.tabla},
+        )
+        conn.execute(
+            text("DELETE FROM raw.cached_datasets WHERE table_name = :t"), {"t": copia.tabla}
+        )
+        if copia.propia is None:
+            return
+        conn.execute(
+            text(
+                """
+                UPDATE catalog_resources
+                SET materialized_table_name = :tabla,
+                    materialization_status = :estado,
+                    updated_at = NOW()
+                WHERE resource_identity = :identidad
+                  AND materialization_status <> 'materialization_corrupted'
+                """
+            ),
+            {
+                "tabla": _qualified_materialized_table_name(
+                    copia.propia, schema_name="raw", fallback_name=copia.propia
+                ),
+                "estado": _materialization_status(copia.propia_estado, copia.propia_error),
+                "identidad": _resource_identity("indec", copia.source_id or ""),
+            },
+        )
+        conn.execute(
+            text(
+                "UPDATE datasets SET is_cached = :cacheado, row_count = :filas, updated_at = NOW() "
+                "WHERE id = CAST(:d AS uuid)"
+            ),
+            {
+                "cacheado": copia.propia_estado == "ready",
+                "filas": copia.propia_filas,
+                "d": copia.dataset_id,
+            },
+        )
+
+
+def retirar_copias(engine, *, dry_run: bool) -> dict[str, Any]:
+    """Borra las copias del colector con su registro, o dice cuáles borraría."""
+    from app.application.catalog.registry_reconcile import require_registry
+
+    # El mismo piso que las demás limpiezas: sin registro no se borra nada.
+    require_registry(engine, task="retirar_copias_indec")
+    copias = copias_del_colector(engine)
+    listas = [c for c in copias if c.espera is None]
+    resumen: dict[str, Any] = {
+        "copias": len(copias),
+        "filas": sum(c.filas for c in listas),
+        "esperan": [f"{c.tabla}: {c.espera}" for c in copias if c.espera],
+        # Se quedan sin tabla publicada hasta que su hoja pase la puerta. Hoy
+        # publican la primera hoja del archivo con este título.
+        "sin_publicar": [c.propia for c in listas if c.propia and c.propia_estado != "ready"],
+    }
+    if dry_run:
+        resumen["borraria"] = [f"raw.{c.tabla} → {c.propia}" for c in listas]
+        return resumen
+    borradas = 0
+    fallidas: list[str] = []
+    for copia in listas:
+        try:
+            _retirar_copia(engine, copia)
+        except Exception as exc:
+            fallidas.append(f"{copia.tabla}: {type(exc).__name__}")
+            logger.warning("INDEC retiro: no se pudo borrar %s", copia.tabla, exc_info=True)
+            continue
+        borradas += 1
+    resumen.update({"borradas": borradas, "fallidas": fallidas})
+    return resumen
+
+
+@celery_app.task(
+    name="openarg.retirar_copias_indec",
+    bind=True,
+    soft_time_limit=1800,
+    time_limit=1900,
+)
+def retirar_copias_indec(self, *, dry_run: bool = True) -> dict[str, Any]:
+    """Borra las `raw.indec__*`: la primera hoja del archivo con el título de otra.
+
+    Por defecto sólo dice qué borraría. No está en el beat: se corre a mano una
+    vez, después de `ingest_indec` y de reconstruir `pobreza_indec_aglomerados`,
+    que es el único mart que lee una de estas tablas.
+    """
+    engine = get_sync_engine()
+    resumen = retirar_copias(engine, dry_run=dry_run)
+    hecho = "simulado" if dry_run else "hecho"
+    logger.info(
+        "INDEC retiro (%s): %s", hecho, {k: v for k, v in resumen.items() if k != "borraria"}
+    )
+    return resumen
