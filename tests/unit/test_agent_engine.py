@@ -2640,8 +2640,9 @@ async def test_las_cifras_de_la_pregunta_y_del_historial_no_piden_otra_vuelta(
 async def test_con_herramientas_y_sin_evidencia_las_cifras_solo_van_al_log(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """Las búsquedas del catálogo redondean filas leídas («unas 62.000» por
-    61.887): en las baterías, 15 de 33 respuestas sin fuentes traen cifras así."""
+    """Las búsquedas del catálogo dan filas que no siempre coinciden con lo
+    leído (ckan_001: 62.000 en una corrida, 61.887 en otra): en las baterías,
+    15 de 36 respuestas sin fuentes traen cifras así."""
     _modo(monkeypatch, None)
     answer = "Hay un padrón de escuelas de unas 62.000 filas."
     llm = ScriptedLLM([_ubicar(), _turn(f"<respuesta>{answer}</respuesta>")])

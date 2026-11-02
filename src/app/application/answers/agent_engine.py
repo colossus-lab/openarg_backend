@@ -37,8 +37,9 @@ Cada turno:
    más, con herramientas (``no_evidence_note``); si sigue sin leer y con
    cifras, o no hay tiempo para la vuelta, sale ``_UNREAD_ANSWER``. Con
    herramientas y sin evidencia (las búsquedas del catálogo) sólo va al log
-   ``answers.sin_evidencia``: esas respuestas redondean cantidades de filas
-   leídas («unas 62.000» por 61.887) y una búsqueda sí les da de dónde salir.
+   ``answers.sin_evidencia``: esas respuestas dan cantidades de filas que no
+   siempre coinciden con lo leído (ckan_001: 62.000 en una corrida, 61.887 en
+   otra), y una búsqueda sí les da de dónde salir.
 
 Sólo con ``correct`` el verificador decide además qué se cita: las fuentes,
 los gráficos, el mapa, `served_table`, las citas estructuradas y la evidencia
