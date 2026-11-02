@@ -7,6 +7,8 @@ INDEC no tiene CKAN. Se predefinen URLs directas a CSV/XLS de alto valor
 
 from __future__ import annotations
 
+import hashlib
+import html
 import io
 import json
 import logging
@@ -27,7 +29,11 @@ from app.application.pipeline.parsers import (
 )
 from app.application.pipeline.parsers.hierarchical_headers import ParsedHeaders, classify_row
 from app.infrastructure.celery.app import celery_app
-from app.infrastructure.celery.tasks._db import get_sync_engine
+from app.infrastructure.celery.tasks._db import (
+    get_sync_engine,
+    register_via_b_table,
+    replace_table_keeping_dependents,
+)
 from app.infrastructure.celery.tasks.collector_tasks import (
     _combine_multirow_header,
     _detect_data_header_range,
@@ -308,6 +314,46 @@ def _block_titles(df_raw: pd.DataFrame, header_rows: list[int]) -> list[str]:
     return titles
 
 
+_PERIOD_DATE_RE = re.compile(r"^(\d{4}-\d{2})-(\d{2})(?: 00:00:00)?$")
+_MIN_PERIODS_TO_CALL_IT_MONTHLY = 12
+_MIN_SHARE_OF_FIRST_OF_MONTH = 0.9
+
+
+def _snap_monthly_periods_to_first(df: pd.DataFrame) -> pd.DataFrame:
+    """Date a monthly series' stray columns on the first of their month.
+
+    The IPC file's columns are real dates shown as `mmm-yy`. Someone typed
+    `mar-26` for March 2026, and Excel reads that as the 26th of March of the
+    current year: the cell holds 2026-03-26, displays `mar-26`, and looks right
+    to anyone opening the file. Read literally, March has no `2026-03-01` and a
+    query for that month finds nothing.
+
+    Only a series that is otherwise first-of-month is touched, so a daily one
+    (the CVS) keeps its days. A month with more than one column is left alone:
+    that is not a typing accident, and merging them would invent duplicates.
+    """
+    if "periodo" not in df.columns:
+        return df
+    values = {str(v) for v in df["periodo"].unique()}
+    if len(values) < _MIN_PERIODS_TO_CALL_IT_MONTHLY:
+        return df
+    by_month: dict[str, list[tuple[str, str]]] = {}
+    for value in values:
+        match = _PERIOD_DATE_RE.match(value)
+        if match is None:
+            return df
+        by_month.setdefault(match.group(1), []).append((value, match.group(2)))
+    fixes = {
+        days[0][0]: f"{month}-01 00:00:00"
+        for month, days in by_month.items()
+        if len(days) == 1 and days[0][1] != "01"
+    }
+    if not fixes or 1 - len(fixes) / len(values) < _MIN_SHARE_OF_FIRST_OF_MONTH:
+        return df
+    logger.info("INDEC: monthly columns dated off the first of the month: %s", sorted(fixes))
+    return df.assign(periodo=df["periodo"].astype(str).replace(fixes))
+
+
 def _parse_xls_sheet(content: bytes, sheet: str | int) -> pd.DataFrame | None:
     """Parse a single Excel sheet, auto-detecting the header row."""
     try:
@@ -430,7 +476,7 @@ def _parse_xls_sheet(content: bytes, sheet: str | int) -> pd.DataFrame | None:
     # unchanged.
     df = unpivot_if_time_pivoted(df)
 
-    return df
+    return _snap_monthly_periods_to_first(df)
 
 
 # What the INDEC's server sends for a spreadsheet. For a file that does not
@@ -612,6 +658,152 @@ def _download_and_parse(url: str) -> dict[str, pd.DataFrame]:
     return {"main": df} if df is not None and not df.empty else {}
 
 
+def _registry_key(engine, table_name: str, suffix: str) -> tuple[str, int]:
+    """The `(resource_identity, version)` this table is registered under.
+
+    `raw_table_versions` allows one row per table. Most INDEC tables got theirs
+    from a backfill (`indec::indec-cache_indec_…`, `backfill_postauto::…`), and
+    the mart asks for `indec::ipc_variaci_n_mensual_aperturas`, while this task
+    used to propose `indec::ipc_Variación mensual aperturas`. A second identity
+    for a registered table hits `uq_raw_table_versions_table_name`, which
+    `register_via_b_table` only logs: no heartbeat (33 of 112 tables had one in
+    staging, 2026-11-02) and no mart refresh. So whoever owns the row keeps it.
+    """
+    with engine.connect() as conn:
+        row = conn.execute(
+            text(
+                "SELECT resource_identity, version FROM public.raw_table_versions "
+                "WHERE schema_name = 'raw' AND table_name = :tn"
+            ),
+            {"tn": table_name},
+        ).first()
+        conn.rollback()
+    if row:
+        return str(row.resource_identity), int(row.version)
+    return f"indec::{_sanitize_table_name(suffix).removeprefix('cache_indec_')}", 1
+
+
+def _ingest_sheet(engine, ds_info: dict, sheet_name: str, df: pd.DataFrame) -> None:
+    """Write one sheet to its table and register it."""
+    suffix = ds_info["id"] if sheet_name == "main" else f"{ds_info['id']}_{sheet_name}"
+    table_name = _sanitize_table_name(suffix)
+
+    if len(df) > MAX_ROWS:
+        df = df.head(MAX_ROWS)
+
+    replace_table_keeping_dependents(engine, df, table_name)
+
+    sheet_info = {
+        **ds_info,
+        "name": (ds_info["name"] if sheet_name == "main" else f"{ds_info['name']} — {sheet_name}"),
+    }
+    dataset_id = _register_dataset(engine, sheet_info, table_name, df)
+    if dataset_id:
+        from app.infrastructure.celery.tasks.scraper_tasks import (
+            index_dataset_embedding,
+        )
+
+        index_dataset_embedding.delay(dataset_id)
+
+    # Register in `raw_table_versions` so marts find this table via the
+    # `live_table('indec::<source_id>')` macro, decoupling them from the
+    # physical `cache_*` name (DEBT-019-006).
+    resource_identity, version = _registry_key(engine, table_name, suffix)
+    register_via_b_table(
+        engine,
+        resource_identity=resource_identity,
+        table_name=table_name,
+        schema_name="raw",
+        version=version,
+        row_count=len(df),
+    )
+
+    logger.info(
+        "INDEC %s [%s]: %d rows cached → %s",
+        ds_info["id"],
+        sheet_name,
+        len(df),
+        table_name,
+    )
+
+
+def _refresh_indec_marts() -> None:
+    """One last refresh of the portal's marts, once every sheet is in.
+
+    `register_via_b_table` dispatches one per sheet, but debounced: the sheets
+    that arrive within two minutes of a refresh get none. The matviews already
+    hold the new rows (`replace_table_keeping_dependents`); what is left behind
+    is `mart_definitions`, whose row count and date coverage are what the planner
+    reads.
+    """
+    from app.infrastructure.celery.tasks.mart_tasks import (
+        find_marts_for_portal,
+        refresh_mart,
+    )
+
+    for mart_id in find_marts_for_portal("indec"):
+        refresh_mart.apply_async(args=[mart_id])
+
+
+def _utc_now() -> datetime:
+    return datetime.now(UTC)
+
+
+def _report_failures(engine, failures: list[tuple[str, str]]) -> None:
+    """Tell a person. Never raises.
+
+    A logged warning is how the IPC went months without loading while the task
+    reported success.
+
+    The key carries the month and the reason because `alerting` reports a key
+    once, then only on its 3rd, 10th and 30th sighting. Keyed by sheet alone, a
+    monthly task stuck on the same failure would speak in months 1, 3 and 10,
+    and a new reason on that sheet would not speak at all. It also bounds what a
+    failed send costs: `alerting` records a key before sending it, so the same
+    key stays quiet for the rest of that month, but not the next one.
+
+    Escaped here because `alerting` sends HTML as is, and Telegram refuses a
+    whole message over one stray `<` in an error text.
+    """
+    if not failures:
+        return
+    try:
+        from app.application.quality.alerting import Alert, notify
+
+        month = f"{_utc_now():%Y-%m}"
+        notify(
+            engine,
+            [
+                Alert(
+                    kind="indec_load_failed",
+                    key=f"{what} {month} {hashlib.sha256(why.encode()).hexdigest()[:12]}",
+                    title=html.escape(what[:80]),
+                    detail=html.escape(why[:300]),
+                )
+                for what, why in failures
+            ],
+            heading="OpenArg · INDEC no se pudo recargar",
+        )
+    except Exception:
+        logger.warning("could not report INDEC failures", exc_info=True)
+
+
+def _finish_run(engine, results: dict[str, int], failures: list[tuple[str, str]]) -> None:
+    """What every run owes, however it ended. Never raises.
+
+    Runs on the way out of a time limit too, when there are usually failures to
+    report and sheets already loaded. Those sheets' matviews hold the new rows,
+    but `mart_definitions` would keep the old coverage for another month.
+    """
+    _report_failures(engine, failures)
+    if not results["ingested"]:
+        return
+    try:
+        _refresh_indec_marts()
+    except Exception:
+        logger.warning("could not dispatch the INDEC mart refresh", exc_info=True)
+
+
 @celery_app.task(
     name="openarg.ingest_indec",
     bind=True,
@@ -627,6 +819,7 @@ def ingest_indec(self):
     """
     engine = get_sync_engine()
     results = {"ingested": 0, "skipped": 0, "errors": 0}
+    failures: list[tuple[str, str]] = []
 
     try:
         for ds_info in INDEC_DATASETS:
@@ -635,76 +828,44 @@ def ingest_indec(self):
                 # catalogue and the download link name the file actually read.
                 ds_info = {**ds_info, "url": resolve_dated_url(ds_info)}
                 sheets = _download_and_parse(ds_info["url"])
-                if not sheets:
-                    results["skipped"] += 1
-                    logger.warning("INDEC %s: no data or unavailable", ds_info["id"])
-                    continue
-
-                for sheet_name, df in sheets.items():
-                    if df.empty:
-                        continue
-
-                    # Build a table name per sheet
-                    suffix = (
-                        ds_info["id"] if sheet_name == "main" else f"{ds_info['id']}_{sheet_name}"
-                    )
-                    table_name = _sanitize_table_name(suffix)
-
-                    if len(df) > MAX_ROWS:
-                        df = df.head(MAX_ROWS)
-
-                    df.to_sql(table_name, engine, schema="raw", if_exists="replace", index=False)
-
-                    sheet_info = {
-                        **ds_info,
-                        "name": (
-                            ds_info["name"]
-                            if sheet_name == "main"
-                            else f"{ds_info['name']} — {sheet_name}"
-                        ),
-                    }
-                    dataset_id = _register_dataset(engine, sheet_info, table_name, df)
-                    if dataset_id:
-                        from app.infrastructure.celery.tasks.scraper_tasks import (
-                            index_dataset_embedding,
-                        )
-
-                        index_dataset_embedding.delay(dataset_id)
-
-                    # Register in `raw_table_versions` so marts find this
-                    # table via `live_table('indec::<source_id>')` macro,
-                    # decoupling them from the physical `cache_*` name
-                    # (DEBT-019-006).
-                    from app.infrastructure.celery.tasks._db import register_via_b_table
-
-                    register_via_b_table(
-                        engine,
-                        resource_identity=f"indec::{suffix}",
-                        table_name=table_name,
-                        schema_name="raw",
-                        row_count=len(df),
-                    )
-
-                    results["ingested"] += 1
-                    logger.info(
-                        "INDEC %s [%s]: %d rows cached → %s",
-                        ds_info["id"],
-                        sheet_name,
-                        len(df),
-                        table_name,
-                    )
-
-            except Exception:
+            except SoftTimeLimitExceeded:
+                raise
+            except Exception as exc:
                 results["errors"] += 1
-                logger.warning("Failed to ingest INDEC %s", ds_info["id"], exc_info=True)
+                failures.append((f"{ds_info['id']}: descarga", str(exc)))
+                logger.exception("Failed to download INDEC %s", ds_info["id"])
+                continue
+
+            if not sheets:
+                results["skipped"] += 1
+                logger.warning("INDEC %s: no data or unavailable", ds_info["id"])
+                continue
+
+            for sheet_name, df in sheets.items():
+                if df.empty:
+                    continue
+                # Per sheet: a table that cannot load must not cost the others
+                # in its file. The first IPC sheet failing kept `Ponderaciones`,
+                # which nothing depends on, frozen along with it.
+                try:
+                    _ingest_sheet(engine, ds_info, sheet_name, df)
+                    results["ingested"] += 1
+                except SoftTimeLimitExceeded:
+                    raise
+                except Exception as exc:
+                    results["errors"] += 1
+                    failures.append((f"{ds_info['id']} [{sheet_name}]", str(exc)))
+                    logger.exception("Failed to load INDEC %s [%s]", ds_info["id"], sheet_name)
 
         return results
 
     except SoftTimeLimitExceeded:
         logger.error("INDEC ingestion timed out")
+        failures.append(("límite de tiempo", f"se cortó con {results['ingested']} hojas cargadas"))
         raise
     except Exception as exc:
         logger.exception("INDEC ingestion failed")
         raise self.retry(exc=exc, countdown=120)
     finally:
+        _finish_run(engine, results, failures)
         engine.dispose()

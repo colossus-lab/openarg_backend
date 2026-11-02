@@ -582,3 +582,158 @@ def safe_truncate_table(engine: Engine, table_name: str) -> None:
         # and double quotes, so the literal `"…"` wrapper is purely cosmetic
         # for parser consistency.
         conn.execute(text(f'TRUNCATE TABLE "{table_name}"'))  # noqa: S608
+
+
+class TableReplaceRefused(RuntimeError):
+    """The new contents would break what reads the table, so nothing was changed."""
+
+
+# Everything built on a table, however deep, shallowest first: a matview over a
+# view over the table has to be refreshed too, and after whatever it reads.
+_SQL_DEPENDENTS = text(
+    """
+    WITH RECURSIVE dep AS (
+        SELECT to_regclass(:q)::oid AS oid, 0 AS depth
+        UNION ALL
+        SELECT v.oid, dep.depth + 1
+        FROM dep
+        JOIN pg_depend d ON d.refobjid = dep.oid
+                        AND d.classid = 'pg_rewrite'::regclass
+                        AND d.refclassid = 'pg_class'::regclass
+        JOIN pg_rewrite w ON w.oid = d.objid
+        JOIN pg_class v ON v.oid = w.ev_class
+        WHERE v.oid <> dep.oid AND dep.depth < 10
+    )
+    SELECT c.oid::regclass::text AS name, c.relkind, c.relispopulated, max(dep.depth) AS depth
+    FROM dep JOIN pg_class c ON c.oid = dep.oid
+    WHERE dep.depth > 0
+    GROUP BY c.oid, c.relkind, c.relispopulated
+    ORDER BY depth, name
+    """
+)
+
+# How far a monthly load may move a table with a mart on it. A series grows by a
+# month at a time: the IPC, stale for six months, goes up 5 %.
+_MIN_ROWS_KEPT = 0.9
+_MAX_ROWS_GROWTH = 1.5
+# How far a matview may move beyond what its table moved, as a share of the table.
+_MATVIEW_SLACK = 0.1
+
+
+def _refuse_if_matview_moved(
+    source: str, matview: str, *, before: int, after: int, old_rows: int, new_rows: int
+) -> None:
+    """Refuse a refresh whose row count the change in the table does not explain.
+
+    A matview over several tables does not go empty when it loses one of them.
+    A `valor` that stops passing its filter took one source of three out of a
+    test mart, from 300 rows to 200, with the table still full. The mart has no
+    record of which row came from where, but rows it gained or lost beyond what
+    the table gained or lost came from the new contents being read differently.
+    """
+    if before and not after:
+        raise TableReplaceRefused(f"{source}: the new rows would empty {matview}")
+    slack = old_rows * _MATVIEW_SLACK
+    lost, gained = before - after, after - before
+    if lost > max(old_rows - new_rows, 0) + slack:
+        raise TableReplaceRefused(
+            f"{source}: {matview} would lose {lost} of {before} rows "
+            f"while the table goes from {old_rows} to {new_rows}"
+        )
+    if gained > max(new_rows - old_rows, 0) + slack:
+        raise TableReplaceRefused(
+            f"{source}: {matview} would gain {gained} over {before} rows "
+            f"while the table goes from {old_rows} to {new_rows}"
+        )
+
+
+def replace_table_keeping_dependents(
+    engine: Engine, df, table_name: str, *, schema: str = "raw"
+) -> list[str]:
+    """Put `df` in `<schema>.<table_name>` without losing what is built on it.
+
+    `to_sql(if_exists="replace")` is a DROP, and Postgres refuses it while a
+    matview reads the table. `ingest_indec` hit that on the first sheet of the
+    IPC file every month after the mart was built, so `mart.inflacion_argentina`
+    stayed at March 2026 and the failure went no further than a warning.
+
+    With no dependents this is still that replace. With dependents the table
+    keeps its identity: the rows change inside one transaction, which also
+    refreshes every matview over it. Any failure rolls all of it back, so readers
+    go on seeing the previous table and the previous mart. Refused, without
+    touching anything:
+
+    - a column change: a matview names its columns, and whether it can survive
+      the change is for its definition to decide, not for a monthly load;
+    - a row count outside 90-150 % of the current one, the signature of a
+      truncated, misread or repeated file;
+    - a refresh that empties a matview, or moves it further than the table moved
+      (`_refuse_if_matview_moved`).
+
+    A refusal is for a person to look at. If the new contents are right after
+    all, the way past it is to drop the mart, load, and run `build_mart`.
+
+    `DELETE`, not `TRUNCATE`. `TRUNCATE` takes ACCESS EXCLUSIVE on the table
+    before the refresh locks the matview, while a concurrent `refresh_mart` locks
+    the matview and then reads the table: that order deadlocks. It would also
+    block every reader of the table for the whole transaction.
+
+    Returns the matviews refreshed.
+    """
+    if df.empty:
+        raise TableReplaceRefused(f"{schema}.{table_name}: refusing to replace with no rows")
+    qualified = f'{schema}."{table_name}"'
+    refreshed: list[str] = []
+    with engine.begin() as conn:
+        # Waiting behind a long query would queue every other reader behind us.
+        conn.execute(text("SET LOCAL lock_timeout = '30s'"))
+        dependents = conn.execute(_SQL_DEPENDENTS, {"q": qualified}).fetchall()
+        if not dependents:
+            df.to_sql(table_name, conn, schema=schema, if_exists="replace", index=False)
+            return refreshed
+
+        names = ", ".join(d.name for d in dependents)
+        current = {
+            r[0]
+            for r in conn.execute(
+                text(
+                    "SELECT column_name FROM information_schema.columns "
+                    "WHERE table_schema = :s AND table_name = :t"
+                ),
+                {"s": schema, "t": table_name},
+            )
+        }
+        incoming = {str(c) for c in df.columns}
+        if incoming != current:
+            raise TableReplaceRefused(
+                f"{qualified}: columns changed under {names} "
+                f"(gone: {sorted(current - incoming)}, new: {sorted(incoming - current)})"
+            )
+        previous_rows = conn.execute(text(f"SELECT count(*) FROM {qualified}")).scalar() or 0  # noqa: S608
+        if previous_rows and not (
+            previous_rows * _MIN_ROWS_KEPT <= len(df) <= previous_rows * _MAX_ROWS_GROWTH
+        ):
+            raise TableReplaceRefused(
+                f"{qualified}: {len(df)} rows would replace {previous_rows} under {names}"
+            )
+
+        def rows_in(name: str) -> int:
+            return conn.execute(text(f"SELECT count(*) FROM {name}")).scalar() or 0  # noqa: S608
+
+        matviews = [d for d in dependents if d.relkind == "m"]
+        rows_before = {m.name: rows_in(m.name) for m in matviews if m.relispopulated}
+        conn.execute(text(f"DELETE FROM {qualified}"))  # noqa: S608
+        df.to_sql(table_name, conn, schema=schema, if_exists="append", index=False)
+        for m in matviews:
+            conn.execute(text(f"REFRESH MATERIALIZED VIEW {m.name}"))
+            if m.name in rows_before:
+                _refuse_if_matview_moved(
+                    qualified,
+                    m.name,
+                    before=rows_before[m.name],
+                    after=rows_in(m.name),
+                    old_rows=previous_rows,
+                    new_rows=len(df),
+                )
+            refreshed.append(m.name)
+    return refreshed
