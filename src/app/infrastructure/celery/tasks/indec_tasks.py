@@ -194,7 +194,9 @@ def _register_dataset(engine, ds_info: dict, table_name: str, df: pd.DataFrame):
                     (:sid, :title, :desc, :org, :portal, :url, :dl, :fmt, :cols, :tags,
                      :now, false, :rows)
                 ON CONFLICT (source_id, portal) DO UPDATE SET
-                    title = EXCLUDED.title, is_cached = false, row_count = EXCLUDED.row_count,
+                    title = EXCLUDED.title, url = EXCLUDED.url,
+                    download_url = EXCLUDED.download_url, format = EXCLUDED.format,
+                    is_cached = false, row_count = EXCLUDED.row_count,
                     columns = EXCLUDED.columns, last_updated_at = :now, updated_at = :now
             """),
             {
