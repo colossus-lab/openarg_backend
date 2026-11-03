@@ -17,6 +17,7 @@ import os
 from datetime import datetime
 
 import httpx
+import pandas as pd
 import pytest
 from openpyxl import Workbook
 from sqlalchemy import text
@@ -515,24 +516,44 @@ def test_una_copia_que_lee_un_mart_espera_y_no_se_audita(base, copias):
 _CUADRO_1 = "cache_indec_pobreza_informe_cuadro_1"
 
 
+def _hoja_de_pobreza(valores: dict[str, tuple[float, float, float, float]]) -> pd.DataFrame:
+    """La hoja en formato largo, como la lee `ingest_indec`; `valores` por rótulo de semestre."""
+    filas = [
+        (seccion, indicador, periodo, por_semestre[i])
+        for periodo, por_semestre in valores.items()
+        for i, (seccion, indicador) in enumerate(
+            [
+                ("Pobreza", "Hogares"),
+                ("Pobreza", "Personas"),
+                ("Indigencia", "Hogares"),
+                ("Indigencia", "Personas"),
+            ]
+        )
+    ]
+    return pd.DataFrame(filas, columns=["seccion", "Indicador", "periodo", "valor"])
+
+
+_SEMESTRES_VIEJOS = {
+    "2do. semestre 2016": (21.5, 30.3, 4.5, 6.1),
+    "1er semestre 2020": (30.4, 40.9, 8.1, 10.5),
+    "2do. semestre 2019 (1)": (25.9, 35.5, 5.7, 8.0),
+}
+
+
 @pytest.fixture
-def mart_pobreza(base):
+def mart_pobreza(base, monkeypatch):
+    from app.infrastructure.celery.tasks import mart_tasks
+
+    monkeypatch.setattr(mart_tasks, "_embed_mart_definition", lambda *a, **k: None, raising=False)
     with base.begin() as conn:
         conn.execute(text("CREATE SCHEMA IF NOT EXISTS mart"))
         conn.execute(text(f'DROP TABLE IF EXISTS raw."{_CUADRO_1}" CASCADE'))
-        conn.execute(
-            text(
-                f'''CREATE TABLE raw."{_CUADRO_1}" ("Indicador" text, "2do. semestre 2016" double precision,
-                "1er. semestre 2026*" double precision)'''
-            )
-        )
-        conn.execute(
-            text(
-                f'''INSERT INTO raw."{_CUADRO_1}" VALUES ('Pobreza', NULL, NULL), ('Hogares', 21.5, 24.4),
-                ('Personas', 30.3, 32.3), ('Indigencia', NULL, NULL), ('Hogares', 4.5, 5.6),
-                ('Personas', 6.1, 7.5), ('Fuente: INDEC.', NULL, NULL)'''
-            )
-        )
+    _db.replace_table_keeping_dependents(
+        base,
+        _hoja_de_pobreza({**_SEMESTRES_VIEJOS, "1er. semestre 2026*": (24.4, 32.3, 5.6, 7.5)}),
+        _CUADRO_1,
+    )
+    with base.begin() as conn:
         conn.execute(
             text(
                 "INSERT INTO public.raw_table_versions (resource_identity, version, schema_name, table_name) "
@@ -552,26 +573,86 @@ def mart_pobreza(base):
         )
 
 
-def test_el_mart_de_pobreza_lee_el_cuadro_1(mart_pobreza, monkeypatch):
-    from app.infrastructure.celery.tasks import mart_tasks
-
-    monkeypatch.setattr(mart_tasks, "_embed_mart_definition", lambda *a, **k: None, raising=False)
-    resultado = mart_tasks.build_mart.run("pobreza_indec_aglomerados")
-    assert resultado.get("error") is None, resultado
-    with mart_pobreza.connect() as conn:
+def _filas_del_mart(engine, periodo: str) -> dict[tuple[str, str], float]:
+    with engine.connect() as conn:
         filas = conn.execute(
             text(
-                "SELECT indicador, periodo, valor FROM mart.pobreza_indec_aglomerados "
-                "ORDER BY indicador, periodo, valor"
-            )
+                "SELECT medida, indicador, valor FROM mart.pobreza_indec_aglomerados "
+                "WHERE periodo = :p"
+            ),
+            {"p": periodo},
         ).all()
-    assert [(i, p, float(v)) for i, p, v in filas] == [
-        ("Hogares", "1er. semestre 2026", 5.6),
-        ("Hogares", "1er. semestre 2026", 24.4),
-        ("Hogares", "2do. semestre 2016", 4.5),
-        ("Hogares", "2do. semestre 2016", 21.5),
-        ("Personas", "1er. semestre 2026", 7.5),
-        ("Personas", "1er. semestre 2026", 32.3),
-        ("Personas", "2do. semestre 2016", 6.1),
-        ("Personas", "2do. semestre 2016", 30.3),
-    ]
+    return {(m, i): float(v) for m, i, v in filas}
+
+
+def test_el_mart_de_pobreza_separa_medidas_y_unifica_rotulos(mart_pobreza):
+    from app.infrastructure.celery.tasks import mart_tasks
+
+    resultado = mart_tasks.build_mart.run("pobreza_indec_aglomerados")
+    assert resultado.get("status") == "built", resultado
+    assert _filas_del_mart(mart_pobreza, "1er. semestre 2026") == {
+        ("pobreza", "Hogares"): 24.4,
+        ("pobreza", "Personas"): 32.3,
+        ("indigencia", "Hogares"): 5.6,
+        ("indigencia", "Personas"): 7.5,
+    }
+    assert _filas_del_mart(mart_pobreza, "1er. semestre 2020")[("pobreza", "Personas")] == 40.9
+    assert _filas_del_mart(mart_pobreza, "2do. semestre 2019")[("pobreza", "Personas")] == 35.5
+
+
+def test_una_edicion_nueva_llega_al_mart_sin_tocar_nada(mart_pobreza):
+    """El caso del 02-nov en prod: semestres nuevos y el asterisco que se mueve."""
+    from app.infrastructure.celery.tasks import mart_tasks
+
+    mart_tasks.build_mart.run("pobreza_indec_aglomerados")
+    siguiente = _hoja_de_pobreza(
+        {
+            **_SEMESTRES_VIEJOS,
+            "1er. semestre 2026": (24.4, 32.3, 5.6, 7.5),
+            "2do. semestre 2026*": (22.0, 30.0, 5.0, 7.0),
+        }
+    )
+    refrescados = _db.replace_table_keeping_dependents(mart_pobreza, siguiente, _CUADRO_1)
+    assert refrescados == ["mart.pobreza_indec_aglomerados"]
+    assert _filas_del_mart(mart_pobreza, "2do. semestre 2026")[("pobreza", "Personas")] == 30.0
+    # Sin el asterisco, el semestre anterior no se duplica ni se pierde.
+    assert len(_filas_del_mart(mart_pobreza, "1er. semestre 2026")) == 4
+
+
+# ── la hoja rechazada ────────────────────────────────────────────────────────
+
+
+def test_una_hoja_rechazada_sigue_failed_despues_de_cada_ingesta(base, monkeypatch):
+    tabla = "cache_indec_zz_hojas_rechazada"
+    source_id = f"indec-{tabla}"
+    monkeypatch.setattr(indec_tasks, "_register_dataset", lambda *a, **k: None)
+    monkeypatch.setattr(_db, "_trigger_marts_for_portal", lambda *a, **k: None)
+    with base.begin() as conn:
+        dataset_id = _dataset(conn, source_id)
+        _recurso(conn, dataset_id, source_id, tabla)
+
+    def estado():
+        with base.connect() as conn:
+            return conn.execute(
+                text(
+                    "SELECT materialization_status FROM catalog_resources "
+                    "WHERE resource_identity = :r"
+                ),
+                {"r": f"indec::{source_id}"},
+            ).scalar()
+
+    hoja = pd.DataFrame({"a": [1, 2], "b": [3, 4]})
+    ds = {"id": "zz_hojas", "name": "ZZ", "url": _URL}
+    # Estaba publicada y ahora se rechaza; y otra vez en la ingesta siguiente.
+    assert estado() == "ready"
+    for _ in range(2):
+        indec_tasks._ingest_sheet(base, ds, "rechazada", hoja)
+        assert estado() == "failed"
+    with base.connect() as conn:
+        assert (
+            conn.execute(
+                text("SELECT count(*) FROM public.raw_table_versions WHERE table_name = :t"),
+                {"t": tabla},
+            ).scalar()
+            == 0
+        )
